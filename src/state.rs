@@ -4,20 +4,229 @@ use crate::{
 };
 
 use anyhow::{anyhow, bail, Result};
+use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
+use std::{collections::HashMap, fmt};
 use time::OffsetDateTime;
-use tokio::{sync::broadcast, sync::Mutex};
+use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio_tungstenite::tungstenite;
 
 #[derive(Debug)]
 pub struct State {
     print_mode: PrintMode,
     traffics: Mutex<IndexMap<usize, Traffic>>,
+    rules: Mutex<Vec<Rule>>,
+    pending: Mutex<HashMap<usize, PendingEntry>>,
     traffics_notifier: broadcast::Sender<TrafficHead>,
     websockets: Mutex<IndexMap<usize, Vec<WebsocketMessage>>>,
     websockets_notifier: broadcast::Sender<(usize, WebsocketMessage)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleMatcher {
+    Any,
+    POST,
+    GET,
+    PUT,
+    DELETE,
+    PATCH,
+    HEAD,
+    OPTIONS,
+    AnyWebsocket,
+}
+
+impl RuleMatcher {
+    pub const ALL: &'static [RuleMatcher] = &[
+        RuleMatcher::Any,
+        RuleMatcher::GET,
+        RuleMatcher::POST,
+        RuleMatcher::PUT,
+        RuleMatcher::DELETE,
+        RuleMatcher::PATCH,
+        RuleMatcher::HEAD,
+        RuleMatcher::OPTIONS,
+        RuleMatcher::AnyWebsocket,
+    ];
+
+    pub fn matches(&self, method: &str, is_websocket: bool) -> bool {
+        match self {
+            RuleMatcher::Any => true,
+            RuleMatcher::AnyWebsocket => is_websocket,
+            RuleMatcher::GET => method.eq_ignore_ascii_case("GET"),
+            RuleMatcher::POST => method.eq_ignore_ascii_case("POST"),
+            RuleMatcher::PUT => method.eq_ignore_ascii_case("PUT"),
+            RuleMatcher::DELETE => method.eq_ignore_ascii_case("DELETE"),
+            RuleMatcher::PATCH => method.eq_ignore_ascii_case("PATCH"),
+            RuleMatcher::HEAD => method.eq_ignore_ascii_case("HEAD"),
+            RuleMatcher::OPTIONS => method.eq_ignore_ascii_case("OPTIONS"),
+        }
+    }
+}
+
+impl fmt::Display for RuleMatcher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RuleMatcher::Any => write!(f, "ANY"),
+            RuleMatcher::POST => write!(f, "POST"),
+            RuleMatcher::GET => write!(f, "GET"),
+            RuleMatcher::PUT => write!(f, "PUT"),
+            RuleMatcher::DELETE => write!(f, "DELETE"),
+            RuleMatcher::PATCH => write!(f, "PATCH"),
+            RuleMatcher::HEAD => write!(f, "HEAD"),
+            RuleMatcher::OPTIONS => write!(f, "OPTIONS"),
+            RuleMatcher::AnyWebsocket => write!(f, "WS"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleAction {
+    PassToDestination,
+    PauseToEditRequest,
+    PauseToEditResponse,
+    PauseToEditRequestAndResponse,
+}
+
+impl RuleAction {
+    pub const ALL: &'static [RuleAction] = &[
+        RuleAction::PassToDestination,
+        RuleAction::PauseToEditRequest,
+        RuleAction::PauseToEditResponse,
+        RuleAction::PauseToEditRequestAndResponse,
+    ];
+}
+
+impl fmt::Display for RuleAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RuleAction::PassToDestination => write!(f, "Pass"),
+            RuleAction::PauseToEditRequest => write!(f, "Edit Request"),
+            RuleAction::PauseToEditResponse => write!(f, "Edit Response"),
+            RuleAction::PauseToEditRequestAndResponse => write!(f, "Edit Req+Res"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rule {
+    pub matcher: RuleMatcher,
+    pub uri_pattern: Option<String>,
+    pub action: RuleAction,
+}
+
+impl Rule {
+    pub fn matches(&self, method: &str, uri: &str, is_websocket: bool) -> bool {
+        if !self.matcher.matches(method, is_websocket) {
+            return false;
+        }
+        match &self.uri_pattern {
+            Some(pattern) => glob_match::glob_match(pattern, uri),
+            None => true,
+        }
+    }
+}
+
+impl fmt::Display for Rule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.matcher)?;
+        if let Some(pattern) = &self.uri_pattern {
+            write!(f, " {}", pattern)?;
+        }
+        write!(f, " → {}", self.action)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingPhase {
+    Request,
+    Response,
+}
+
+impl fmt::Display for PendingPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PendingPhase::Request => write!(f, "Request"),
+            PendingPhase::Response => write!(f, "Response"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum PendingResolution {
+    Continue(Option<ModifiedTraffic>),
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModifiedTraffic {
+    pub headers: Option<Vec<(String, String)>>,
+    pub body: Option<Vec<u8>>,
+}
+
+impl ModifiedTraffic {
+    /// parse modified json request back into modifiedtraffic
+    pub fn from_edited_json_req(json: &str) -> Option<Self> {
+        let val: serde_json::Value = serde_json::from_str(json).ok()?;
+        let headers = val.get("req_headers").and_then(|h| {
+            h.get("items").and_then(|items| {
+                items.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let name = item.get("name")?.as_str()?;
+                            let value = item.get("value")?.as_str()?;
+                            Some((name.to_string(), value.to_string()))
+                        })
+                        .collect()
+                })
+            })
+        });
+        let body = val.get("req_body").and_then(|b| {
+            let encode = b.get("encode")?.as_str()?;
+            let value = b.get("value")?.as_str()?;
+            if encode == "base64" {
+                base64::engine::general_purpose::STANDARD.decode(value).ok()
+            } else {
+                Some(value.as_bytes().to_vec())
+            }
+        });
+        Some(Self { headers, body })
+    }
+
+    /// parse json response object into a modified traffic object
+    pub fn from_edited_json_res(json: &str) -> Option<Self> {
+        let val: serde_json::Value = serde_json::from_str(json).ok()?;
+        let headers = val.get("res_headers").and_then(|h| {
+            h.get("items").and_then(|items| {
+                items.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let name = item.get("name")?.as_str()?;
+                            let value = item.get("value")?.as_str()?;
+                            Some((name.to_string(), value.to_string()))
+                        })
+                        .collect()
+                })
+            })
+        });
+        let body = val.get("res_body").and_then(|b| {
+            let encode = b.get("encode")?.as_str()?;
+            let value = b.get("value")?.as_str()?;
+            if encode == "base64" {
+                base64::engine::general_purpose::STANDARD.decode(value).ok()
+            } else {
+                Some(value.as_bytes().to_vec())
+            }
+        });
+        Some(Self { headers, body })
+    }
+}
+
+#[derive(Debug)]
+struct PendingEntry {
+    sender: oneshot::Sender<PendingResolution>,
+    phase: PendingPhase,
 }
 
 impl State {
@@ -27,11 +236,92 @@ impl State {
         Self {
             print_mode,
             traffics: Default::default(),
+            rules: Default::default(),
+            pending: Default::default(),
             traffics_notifier,
             websockets: Default::default(),
             websockets_notifier,
         }
     }
+
+    pub async fn list_rules(&self) -> Vec<Rule> {
+        self.rules.lock().await.clone()
+    }
+
+    pub async fn add_rule(&self, rule: Rule) {
+        self.rules.lock().await.push(rule);
+    }
+
+    pub async fn remove_rule(&self, index: usize) {
+        let mut rules = self.rules.lock().await;
+        if index < rules.len() {
+            rules.remove(index);
+        }
+    }
+
+    pub async fn match_rules(
+        &self,
+        method: &str,
+        uri: &str,
+        is_websocket: bool,
+    ) -> Option<RuleAction> {
+        let rules = self.rules.lock().await;
+        rules
+            .iter()
+            .find(|rule| rule.matches(method, uri, is_websocket))
+            .map(|rule| rule.action)
+    }
+
+    pub async fn add_pending(
+        &self,
+        gid: usize,
+        phase: PendingPhase,
+    ) -> oneshot::Receiver<PendingResolution> {
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .await
+            .insert(gid, PendingEntry { sender: tx, phase });
+        self.set_traffic_pending(gid, true).await;
+        rx
+    }
+
+    pub async fn resolve_pending(&self, gid: usize, resolution: PendingResolution) -> bool {
+        let entry = self.pending.lock().await.remove(&gid);
+        if let Some(entry) = entry {
+            self.set_traffic_pending(gid, false).await;
+            let _ = entry.sender.send(resolution);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn is_pending(&self, gid: usize) -> Option<PendingPhase> {
+        self.pending.lock().await.get(&gid).map(|e| e.phase)
+    }
+
+    pub async fn cancel_all_pending(&self) {
+        let entries: Vec<_> = {
+            let mut pending = self.pending.lock().await;
+            pending.drain().collect()
+        };
+        for (_, entry) in entries {
+            let _ = entry.sender.send(PendingResolution::Continue(None));
+        }
+    }
+
+    async fn set_traffic_pending(&self, gid: usize, pending: bool) {
+        let mut traffics = self.traffics.lock().await;
+        let Some((id, traffic)) = traffics.iter_mut().find(|(_, v)| v.gid == gid) else {
+            return;
+        };
+        let mut head = traffic.head(*id);
+        head.pending = pending;
+        let _ = self.traffics_notifier.send(head);
+    }
+
+    // --- end of bullshit that i have to implement for the type ---
 
     pub async fn add_traffic(&self, traffic: Traffic) {
         if !traffic.valid {
@@ -41,6 +331,25 @@ impl State {
         let id = traffics.len() + 1;
         let head = traffic.head(id);
         traffics.insert(id, traffic);
+        let _ = self.traffics_notifier.send(head);
+    }
+
+    pub async fn add_traffic_early(&self, traffic: &Traffic) -> usize {
+        let mut traffics = self.traffics.lock().await;
+        let id = traffics.len() + 1;
+        let head = traffic.head(id);
+        traffics.insert(id, traffic.clone());
+        let _ = self.traffics_notifier.send(head);
+        id
+    }
+
+    pub async fn update_traffic(&self, traffic: &Traffic) {
+        let mut traffics = self.traffics.lock().await;
+        let Some((id, existing)) = traffics.iter_mut().find(|(_, v)| v.gid == traffic.gid) else {
+            return;
+        };
+        *existing = traffic.clone();
+        let head = traffic.head(*id);
         let _ = self.traffics_notifier.send(head);
     }
 
@@ -69,6 +378,14 @@ impl State {
     pub async fn get_traffic(&self, id: usize) -> Option<Traffic> {
         let traffics = self.traffics.lock().await;
         traffics.get(&id).cloned()
+    }
+
+    pub async fn get_traffic_by_gid(&self, gid: usize) -> Option<(usize, Traffic)> {
+        let traffics = self.traffics.lock().await;
+        traffics
+            .iter()
+            .find(|(_, v)| v.gid == gid)
+            .map(|(id, t)| (*id, t.clone()))
     }
 
     pub fn subscribe_traffics(&self) -> broadcast::Receiver<TrafficHead> {

@@ -1,5 +1,8 @@
 use crate::{
-    state::{State, SubscribedWebSocket, WebsocketMessage},
+    state::{
+        ModifiedTraffic, PendingResolution, Rule, RuleAction, RuleMatcher, State,
+        SubscribedWebSocket, WebsocketMessage,
+    },
     traffic::{get_header_value, Body, Headers, Traffic, TrafficHead},
     utils::*,
 };
@@ -36,6 +39,7 @@ const LARGE_WIDTH: u16 = 100;
 const SELECTED_STYLE: Style = Style::new().bg(GRAY.c800).add_modifier(Modifier::BOLD);
 const BOLD_STYLE: Style = Style::new().add_modifier(Modifier::BOLD);
 const EXPORT_ALL_TRAFFICS: &str = "proxyfor_all_traffics";
+const ORANGE: Color = Color::Rgb(255, 165, 0);
 
 const COPY_ACTIONS: [(&str, &str); 5] = [
     ("Copy as Markdown", "markdown"),
@@ -50,6 +54,94 @@ const EXPORT_ACTIONS: [(&str, &str); 3] = [
     ("Export all as cURL", "curl"),
     ("Export all as HAR", "har"),
 ];
+
+#[derive(Debug, Clone, PartialEq)]
+enum View {
+    Main,
+    Details,
+}
+
+impl View {
+    fn keybindings(&self, has_pending: bool) -> Vec<(&str, &str, Option<Color>)> {
+        match self {
+            View::Main => {
+                let mut bindings = vec![
+                    ("↵", "Select", None),
+                    ("⇅", "Navigate", None),
+                    ("/", "Search", None),
+                    ("c", "Copy", None),
+                    ("e", "Export", None),
+                    ("r", "Rules", None),
+                ];
+                // rule matchers can be resolved to the default quickly like this if you're
+                // matching too much, glob matching is usually enough but let me know if you have
+                // issues with this and would like regex matching (I can't write regex)
+                if has_pending {
+                    bindings.push(("f", "Forward", Some(ORANGE)));
+                }
+                bindings.push(("q", "Quit", None));
+                bindings
+            }
+            View::Details => {
+                let mut bindings = vec![
+                    ("↹", "Switch", None),
+                    ("⇅", "Scroll", None),
+                    ("n", "Next", None),
+                    ("p", "Prev", None),
+                    ("c", "Copy", None),
+                    ("e", "Export", None),
+                ];
+                if has_pending {
+                    bindings.push(("o", "Edit", Some(ORANGE)));
+                }
+                bindings.push(("q", "Back", None));
+                bindings
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Message {
+    TrafficHead(TrafficHead),
+    TrafficDetails(Box<TrafficDetails>),
+    SubscribedWebSocket(Box<SubscribedWebSocket>),
+    RulesLoaded(Vec<Rule>),
+    Info(String),
+    Error(String),
+}
+
+type TrafficDetails = (Traffic, Option<Body>, Option<Body>);
+
+type Notifier = (String, bool, u64); // (message, is_error, timeout_step)
+
+#[derive(Debug, Clone)]
+enum RulesPopupState {
+    List(usize),
+    NewMatcher(usize),
+    NewUri(RuleMatcher, Input),
+    NewAction(RuleMatcher, Option<String>, usize),
+}
+
+#[derive(Debug, Clone)]
+enum Popup {
+    Copy(usize),
+    Export(usize),
+    Rules(RulesPopupState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Confirm {
+    Quit,
+    SendEdited,
+}
+
+#[derive(Debug)]
+struct PendingEdit {
+    gid: usize,
+    #[allow(dead_code)]
+    modified_content: String,
+}
 
 pub async fn run(state: Arc<State>, addr: &str) -> Result<()> {
     let mut traffic_rx = state.subscribe_traffics();
@@ -97,6 +189,8 @@ struct App {
     search_input: Input,
     should_quit: bool,
     step: u64,
+    rules_cache: Vec<Rule>,
+    pending_edit: Option<PendingEdit>,
 }
 
 impl App {
@@ -106,7 +200,7 @@ impl App {
             addr: addr.to_string(),
             message_tx,
             selected_traffic_index: 0,
-            traffics: Vec::new(),
+            traffics: vec![],
             filtered_traffic_indices: None,
             details_tab_index: 0,
             details_scroll_offset: 0,
@@ -121,26 +215,28 @@ impl App {
             search_input: Input::default(),
             should_quit: false,
             step: 0,
+            rules_cache: vec![],
+            pending_edit: None,
         }
     }
 
     fn run(
         mut self,
-        terminal: &mut Terminal<impl Backend>,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         mut rx: mpsc::UnboundedReceiver<Message>,
     ) -> Result<()> {
         let tick_rate = Duration::from_millis(TICK_INTERVAL);
         let mut last_tick = Instant::now();
         loop {
             if self.should_quit {
+                let state = self.state.clone();
+                tokio::spawn(async move {
+                    state.cancel_all_pending().await;
+                });
                 break;
             }
 
             terminal.draw(|frame| self.draw(frame))?;
-
-            let timeout = tick_rate
-                .checked_sub(last_tick.elapsed())
-                .unwrap_or_else(|| Duration::from_secs(0));
 
             while let Ok(message) = rx.try_recv() {
                 self.handle_message(message);
@@ -148,7 +244,7 @@ impl App {
 
             self.handle_websocket_message();
 
-            self.handle_events(timeout)?;
+            self.handle_events(terminal)?;
 
             self.maybe_clear_notifier();
 
@@ -303,6 +399,15 @@ impl App {
         });
     }
 
+    fn load_rules(&self) {
+        let state = self.state.clone();
+        let message_tx = self.message_tx.clone();
+        tokio::spawn(async move {
+            let rules = state.list_rules().await;
+            let _ = message_tx.send(Message::RulesLoaded(rules));
+        });
+    }
+
     fn notify(&mut self, message: &str, is_error: bool) {
         let step = MESSAGE_TIMEOUT / TICK_INTERVAL;
         self.current_notifier = Some((message.to_string(), is_error, self.step + step));
@@ -337,6 +442,9 @@ impl App {
             Message::SubscribedWebSocket(subscribed_websocket) => {
                 self.current_websocket = Some(subscribed_websocket);
             }
+            Message::RulesLoaded(rules) => {
+                self.rules_cache = rules;
+            }
             Message::Error(error) => self.notify(&error, true),
             Message::Info(info) => self.notify(&info, false),
         }
@@ -351,7 +459,11 @@ impl App {
         }
     }
 
-    fn handle_events(&mut self, timeout: Duration) -> Result<()> {
+    fn handle_events(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> Result<()> {
+        let timeout = Duration::from_millis(TICK_INTERVAL);
         if crossterm::event::poll(timeout)? {
             let event = event::read()?;
             if let event::Event::Key(key) = event {
@@ -359,6 +471,43 @@ impl App {
                     return Ok(());
                 }
                 if self.input_mode {
+                    // Check if we're in the Rules URI input mode
+                    if let Some(Popup::Rules(RulesPopupState::NewUri(_, _))) = &self.current_popup {
+                        match key.code {
+                            KeyCode::Esc => {
+                                // Go back to matcher selection
+                                self.current_popup =
+                                    Some(Popup::Rules(RulesPopupState::NewMatcher(0)));
+                                self.input_mode = false;
+                            }
+                            KeyCode::Enter => {
+                                if let Some(Popup::Rules(RulesPopupState::NewUri(matcher, input))) =
+                                    self.current_popup.take()
+                                {
+                                    let uri_pattern = if input.value().is_empty() {
+                                        None
+                                    } else {
+                                        Some(input.value().to_string())
+                                    };
+                                    self.current_popup = Some(Popup::Rules(
+                                        RulesPopupState::NewAction(matcher, uri_pattern, 0),
+                                    ));
+                                    self.input_mode = false;
+                                }
+                            }
+                            _ => {
+                                if let Some(Popup::Rules(RulesPopupState::NewUri(
+                                    _,
+                                    ref mut input,
+                                ))) = self.current_popup
+                                {
+                                    input.handle_event(&event);
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+                    // Normal search input mode
                     match key.code {
                         KeyCode::Esc => {
                             self.input_mode = false;
@@ -376,17 +525,60 @@ impl App {
                 } else if self.current_confirm.is_some() {
                     match key.code {
                         KeyCode::Char('y') => {
-                            if let Some(Confirm::Quit) = self.current_confirm {
-                                self.should_quit = true;
+                            match self.current_confirm {
+                                Some(Confirm::Quit) => {
+                                    self.should_quit = true;
+                                }
+                                Some(Confirm::SendEdited) => {
+                                    if let Some(edit) = self.pending_edit.take() {
+                                        let state = self.state.clone();
+                                        let message_tx = self.message_tx.clone();
+                                        tokio::spawn(async move {
+                                            let phase = state.is_pending(edit.gid).await;
+                                            let modified = match phase {
+                                                Some(crate::state::PendingPhase::Request) => {
+                                                    ModifiedTraffic::from_edited_json_req(
+                                                        &edit.modified_content,
+                                                    )
+                                                }
+                                                Some(crate::state::PendingPhase::Response) => {
+                                                    ModifiedTraffic::from_edited_json_res(
+                                                        &edit.modified_content,
+                                                    )
+                                                }
+                                                None => None,
+                                            };
+                                            let resolution = PendingResolution::Continue(modified);
+                                            if state.resolve_pending(edit.gid, resolution).await {
+                                                let _ = message_tx.send(Message::Info(
+                                                    "Pending traffic resolved".into(),
+                                                ));
+                                            } else {
+                                                let _ = message_tx.send(Message::Error(
+                                                    "Traffic no longer pending".into(),
+                                                ));
+                                            }
+                                        });
+                                    }
+                                }
+                                None => {}
                             }
+                            self.current_confirm = None;
                         }
                         KeyCode::Esc | KeyCode::Char('n') => {
                             self.current_confirm = None;
+                            self.pending_edit = None;
                         }
                         _ => {}
                     }
                     return Ok(());
                 }
+
+                // Handle Rules popup keys
+                if let Some(Popup::Rules(_)) = &self.current_popup {
+                    return self.handle_rules_popup_key(key.code);
+                }
+
                 match key.code {
                     KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                         self.current_popup = None;
@@ -408,6 +600,14 @@ impl App {
                             }
                         }
                     }
+                    KeyCode::Char('r') => {
+                        if self.current_popup.is_some() {
+                            self.current_popup = None;
+                        } else {
+                            self.load_rules();
+                            self.current_popup = Some(Popup::Rules(RulesPopupState::List(0)));
+                        }
+                    }
                     KeyCode::Down | KeyCode::Char('j') => {
                         if let Some(popup) = self.current_popup.as_mut() {
                             match popup {
@@ -417,6 +617,7 @@ impl App {
                                 Popup::Export(idx) => {
                                     *idx = next_idx(EXPORT_ACTIONS.len(), *idx);
                                 }
+                                Popup::Rules(_) => {} // handled above
                             }
                         } else {
                             match self.current_view {
@@ -447,6 +648,7 @@ impl App {
                                 Popup::Export(idx) => {
                                     *idx = prev_idx(EXPORT_ACTIONS.len(), *idx);
                                 }
+                                Popup::Rules(_) => {} // handled above
                             }
                         } else {
                             match self.current_view {
@@ -473,6 +675,7 @@ impl App {
                             match popup {
                                 Popup::Copy(idx) => self.run_copy_command(*idx),
                                 Popup::Export(idx) => self.run_export_command(*idx),
+                                Popup::Rules(_) => {} // handled above
                             }
                             self.current_popup = None;
                         } else if self.current_view == View::Main
@@ -526,11 +729,249 @@ impl App {
                             self.input_mode = true;
                         }
                     }
+                    KeyCode::Char('o') => {
+                        if self.current_view == View::Details {
+                            self.handle_editor_open(terminal);
+                        }
+                    }
+                    KeyCode::Char('f') => {
+                        if self.current_view == View::Main {
+                            self.forward_pending_traffic();
+                        }
+                    }
                     _ => {}
                 }
             }
         }
         Ok(())
+    }
+
+    fn handle_rules_popup_key(&mut self, key: KeyCode) -> Result<()> {
+        let Some(Popup::Rules(ref state)) = self.current_popup else {
+            return Ok(());
+        };
+
+        match state {
+            RulesPopupState::List(idx) => {
+                let idx = *idx;
+                match key {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.current_popup = None;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if !self.rules_cache.is_empty() {
+                            self.current_popup = Some(Popup::Rules(RulesPopupState::List(
+                                next_idx(self.rules_cache.len(), idx),
+                            )));
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if !self.rules_cache.is_empty() {
+                            self.current_popup = Some(Popup::Rules(RulesPopupState::List(
+                                prev_idx(self.rules_cache.len(), idx),
+                            )));
+                        }
+                    }
+                    KeyCode::Char('n') => {
+                        self.current_popup = Some(Popup::Rules(RulesPopupState::NewMatcher(0)));
+                    }
+                    KeyCode::Char('d') => {
+                        if idx < self.rules_cache.len() {
+                            let state = self.state.clone();
+                            let message_tx = self.message_tx.clone();
+                            let remove_idx = idx;
+                            tokio::spawn(async move {
+                                state.remove_rule(remove_idx).await;
+                                let rules = state.list_rules().await;
+                                let _ = message_tx.send(Message::RulesLoaded(rules));
+                            });
+                            // Adjust selection
+                            let new_idx = if idx > 0 { idx - 1 } else { 0 };
+                            self.current_popup = Some(Popup::Rules(RulesPopupState::List(new_idx)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            RulesPopupState::NewMatcher(idx) => {
+                let idx = *idx;
+                match key {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.current_popup = Some(Popup::Rules(RulesPopupState::List(0)));
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.current_popup = Some(Popup::Rules(RulesPopupState::NewMatcher(
+                            next_idx(RuleMatcher::ALL.len(), idx),
+                        )));
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.current_popup = Some(Popup::Rules(RulesPopupState::NewMatcher(
+                            prev_idx(RuleMatcher::ALL.len(), idx),
+                        )));
+                    }
+                    KeyCode::Enter => {
+                        let matcher = RuleMatcher::ALL[idx];
+                        self.current_popup = Some(Popup::Rules(RulesPopupState::NewUri(
+                            matcher,
+                            Input::default(),
+                        )));
+                        self.input_mode = true;
+                    }
+                    _ => {}
+                }
+            }
+            RulesPopupState::NewUri(_, _) => {
+                // Handled in input_mode section
+            }
+            RulesPopupState::NewAction(matcher, uri_pattern, idx) => {
+                let matcher = *matcher;
+                let uri_pattern = uri_pattern.clone();
+                let idx = *idx;
+                match key {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.current_popup = Some(Popup::Rules(RulesPopupState::NewUri(
+                            matcher,
+                            Input::default(),
+                        )));
+                        self.input_mode = true;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.current_popup = Some(Popup::Rules(RulesPopupState::NewAction(
+                            matcher,
+                            uri_pattern,
+                            next_idx(RuleAction::ALL.len(), idx),
+                        )));
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.current_popup = Some(Popup::Rules(RulesPopupState::NewAction(
+                            matcher,
+                            uri_pattern,
+                            prev_idx(RuleAction::ALL.len(), idx),
+                        )));
+                    }
+                    KeyCode::Enter => {
+                        let action = RuleAction::ALL[idx];
+                        let rule = Rule {
+                            matcher,
+                            uri_pattern,
+                            action,
+                        };
+                        let state = self.state.clone();
+                        let message_tx = self.message_tx.clone();
+                        tokio::spawn(async move {
+                            state.add_rule(rule).await;
+                            let rules = state.list_rules().await;
+                            let _ = message_tx.send(Message::RulesLoaded(rules));
+                        });
+                        self.current_popup = Some(Popup::Rules(RulesPopupState::List(0)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn forward_pending_traffic(&mut self) {
+        let Some(head) = self.selected_traffic() else {
+            return;
+        };
+        if !head.pending {
+            self.notify("Traffic is not pending", true);
+            return;
+        }
+        let gid = head.gid;
+        let state = self.state.clone();
+        let message_tx = self.message_tx.clone();
+        tokio::spawn(async move {
+            let resolution = PendingResolution::Continue(None);
+            if state.resolve_pending(gid, resolution).await {
+                let _ = message_tx.send(Message::Info("Forwarded".into()));
+            } else {
+                let _ = message_tx.send(Message::Error("Traffic no longer pending".into()));
+            }
+        });
+    }
+
+    fn handle_editor_open(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+        let Some(head) = self.selected_traffic() else {
+            return;
+        };
+        let gid = head.gid;
+
+        // Check if traffic is pending (we need to do this synchronously check from cached data)
+        if !head.pending {
+            self.notify("Traffic is not pending", true);
+            return;
+        }
+
+        let Some((traffic, req_body, res_body)) = self.current_traffic.as_deref() else {
+            self.notify("No traffic details loaded", true);
+            return;
+        };
+
+        // Serialize to JSON
+        let json_value = serde_json::json!({
+            "method": traffic.method,
+            "uri": traffic.uri,
+            "req_headers": traffic.req_headers,
+            "req_body": req_body,
+            "res_headers": traffic.res_headers,
+            "res_body": res_body,
+        });
+        let json_str = match serde_json::to_string_pretty(&json_value) {
+            Ok(v) => v,
+            Err(err) => {
+                self.notify(&format!("Failed to serialize: {err}"), true);
+                return;
+            }
+        };
+
+        let temp_path = format!("/tmp/proxyfor-edit-{gid}.json");
+        if std::fs::write(&temp_path, &json_str).is_err() {
+            self.notify("Failed to write temp file", true);
+            return;
+        }
+
+        // Suspend TUI
+        let _ = disable_raw_mode();
+        let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+
+        // Launch editor
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+        let status = std::process::Command::new(&editor).arg(&temp_path).status();
+
+        // Restore TUI
+        let _ = enable_raw_mode();
+        let _ = execute!(terminal.backend_mut(), EnterAlternateScreen);
+        let _ = terminal.clear();
+
+        match status {
+            Ok(exit_status) if exit_status.success() => {
+                match std::fs::read_to_string(&temp_path) {
+                    Ok(content) => {
+                        // Validate JSON
+                        if serde_json::from_str::<serde_json::Value>(&content).is_err() {
+                            self.notify("Invalid JSON in edited file", true);
+                        } else {
+                            self.pending_edit = Some(PendingEdit {
+                                gid,
+                                modified_content: content,
+                            });
+                            self.current_confirm = Some(Confirm::SendEdited);
+                        }
+                    }
+                    Err(_) => {
+                        self.notify("Failed to read edited file", true);
+                    }
+                }
+            }
+            _ => {
+                self.notify("Editor exited with error", true);
+            }
+        }
+
+        let _ = std::fs::remove_file(&temp_path);
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -576,6 +1017,11 @@ impl App {
                 let mime = ellipsis_head(&head.mime.clone(), mime_width);
                 let size = format_size(head.size.map(|v| v as _));
                 let time_delta = format_time_delta(head.time.map(|v| v as _));
+                let row_style = if head.pending {
+                    Style::default().fg(ORANGE)
+                } else {
+                    Style::default()
+                };
                 let widget = [
                     Cell::from(method),
                     Cell::from(uri),
@@ -586,7 +1032,8 @@ impl App {
                 ]
                 .into_iter()
                 .collect::<Row>()
-                .height(1);
+                .height(1)
+                .style(row_style);
                 widget
             });
             let table = Table::new(
@@ -621,12 +1068,21 @@ impl App {
                     }
                     None => "".to_string(),
                 };
+                let row_style = if head.pending {
+                    Style::default().fg(ORANGE)
+                } else {
+                    Style::default()
+                };
                 let text = format!(
                     "{}\n{}",
                     ellipsis_tail(&title, width),
                     ellipsis_tail(&description, width)
                 );
-                [Cell::from(text)].into_iter().collect::<Row>().height(2)
+                [Cell::from(text)]
+                    .into_iter()
+                    .collect::<Row>()
+                    .height(2)
+                    .style(row_style)
             });
 
             let table = Table::new(rows, [Constraint::Percentage(100)])
@@ -733,27 +1189,40 @@ impl App {
     }
 
     fn render_help_banner(&self, frame: &mut Frame, area: Rect) {
-        let keybindings = self.current_view.keybindings();
+        let has_pending = self.selected_traffic().map(|h| h.pending).unwrap_or(false);
+        let keybindings = self.current_view.keybindings(has_pending);
         let style = Style::default().dim();
-        let spans = keybindings.iter().enumerate().flat_map(|(i, (key, desc))| {
-            let sep: Span = if i == keybindings.len() - 1 {
-                "".into()
-            } else {
-                " | ".into()
-            };
-            vec![
-                Span::raw(*key),
-                Span::raw(" "),
-                Span::raw(*desc).style(style),
-                sep.style(style),
-            ]
-        });
+        let spans = keybindings
+            .iter()
+            .enumerate()
+            .flat_map(|(i, (key, desc, color))| {
+                let sep: Span = if i == keybindings.len() - 1 {
+                    "".into()
+                } else {
+                    " | ".into()
+                };
+                let key_style = match color {
+                    Some(c) => Style::default().fg(*c),
+                    None => Style::default(),
+                };
+                vec![
+                    Span::raw(*key).style(key_style),
+                    Span::raw(" "),
+                    Span::raw(*desc).style(if color.is_some() {
+                        Style::default().fg(color.unwrap())
+                    } else {
+                        style
+                    }),
+                    sep.style(style),
+                ]
+            });
         frame.render_widget(Paragraph::new(Line::from_iter(spans)), area);
     }
 
     fn render_confirm(&self, frame: &mut Frame, area: Rect, confirm: &Confirm) {
         let text = match confirm {
             Confirm::Quit => "Quit",
+            Confirm::SendEdited => "Send edited traffic",
         };
         let style = Style::default().bold().underlined();
         let line = Line::from(vec![
@@ -771,6 +1240,7 @@ impl App {
         match &self.current_popup {
             Some(Popup::Copy(idx)) => self.render_action_popup(frame, *idx, &COPY_ACTIONS, 24),
             Some(Popup::Export(idx)) => self.render_action_popup(frame, *idx, &EXPORT_ACTIONS, 30),
+            Some(Popup::Rules(state)) => self.render_rule_popup(frame, state),
             None => {}
         }
     }
@@ -801,7 +1271,102 @@ impl App {
         frame.render_widget(paragraph, area);
     }
 
+    fn render_rule_popup(&self, frame: &mut Frame, state: &RulesPopupState) {
+        match state {
+            RulesPopupState::List(idx) => {
+                let title = "Rules [n: new, d: delete]";
+                let rules = &self.rules_cache;
+                let texts: Vec<Line> = if rules.is_empty() {
+                    vec![Line::raw("  No rules defined").style(Style::default().dim())]
+                } else {
+                    rules
+                        .iter()
+                        .enumerate()
+                        .map(|(i, rule)| {
+                            let style = if i == *idx {
+                                SELECTED_STYLE
+                            } else {
+                                Style::default()
+                            };
+                            Line::raw(format!("  {rule}")).style(style)
+                        })
+                        .collect()
+                };
+                let block = Block::bordered().title(title);
+                let height = (texts.len() as u16).max(1) + 2;
+                let paragraph = Paragraph::new(texts).block(block);
+                let area = popup_absolute_area(frame.area(), 50, height);
+                frame.render_widget(Clear, area);
+                frame.render_widget(paragraph, area);
+            }
+            RulesPopupState::NewMatcher(idx) => {
+                let title = "Select Matcher";
+                let matchers = RuleMatcher::ALL;
+                let texts: Vec<Line> = matchers
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let style = if i == *idx {
+                            SELECTED_STYLE
+                        } else {
+                            Style::default()
+                        };
+                        Line::raw(format!("  {m}")).style(style)
+                    })
+                    .collect();
+                let block = Block::bordered().title(title);
+                let height = texts.len() as u16 + 2;
+                let paragraph = Paragraph::new(texts).block(block);
+                let area = popup_absolute_area(frame.area(), 30, height);
+                frame.render_widget(Clear, area);
+                frame.render_widget(paragraph, area);
+            }
+            RulesPopupState::NewUri(matcher, input) => {
+                let title = format!("URI glob for {matcher} (empty=all)");
+                let block = Block::bordered().title(title);
+                let space = if self.input_mode { " " } else { "" };
+                let text = Line::raw(format!("  {}{space}", input.value()));
+                let paragraph = Paragraph::new(text).block(block);
+                let area = popup_absolute_area(frame.area(), 50, 3);
+                frame.render_widget(Clear, area);
+                frame.render_widget(paragraph, area);
+                if self.input_mode {
+                    let cursor_x = area.x + 3 + input.value().len() as u16;
+                    let cursor_y = area.y + 1;
+                    frame.set_cursor_position((cursor_x, cursor_y));
+                }
+            }
+            RulesPopupState::NewAction(matcher, uri_pattern, idx) => {
+                let uri_display = uri_pattern.as_deref().unwrap_or("*");
+                let title = format!("Action for {matcher} {uri_display}");
+                let actions = RuleAction::ALL;
+                let texts: Vec<Line> = actions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let style = if i == *idx {
+                            SELECTED_STYLE
+                        } else {
+                            Style::default()
+                        };
+                        Line::raw(format!("  {a}")).style(style)
+                    })
+                    .collect();
+                let block = Block::bordered().title(title);
+                let height = texts.len() as u16 + 2;
+                let paragraph = Paragraph::new(texts).block(block);
+                let area = popup_absolute_area(frame.area(), 40, height);
+                frame.render_widget(Clear, area);
+                frame.render_widget(paragraph, area);
+            }
+        }
+    }
+
     fn render_input(&self, frame: &mut Frame) {
+        // Don't render search input if we're in rules URI input mode
+        if let Some(Popup::Rules(RulesPopupState::NewUri(_, _))) = &self.current_popup {
+            return;
+        }
         if !self.input_mode && self.search_input.value().is_empty() {
             return;
         }
@@ -910,7 +1475,7 @@ fn build_details_title_spans(traffic: &Traffic, selected: usize) -> Vec<Span<'st
     spans
 }
 
-fn build_details_head_lines(traffic: &Traffic) -> Vec<Line> {
+fn build_details_head_lines(traffic: &Traffic) -> Vec<Line<'_>> {
     let mut lines = vec![];
     lines.push(Line::raw(format!("{} {}", traffic.method, traffic.uri)));
     let mut head_parts = vec![];
@@ -927,7 +1492,7 @@ fn build_details_head_lines(traffic: &Traffic) -> Vec<Line> {
     lines
 }
 
-fn build_headers_lines(headers: Option<&Headers>, width: usize) -> Vec<Line> {
+fn build_headers_lines(headers: Option<&Headers>, width: usize) -> Vec<Line<'_>> {
     let Some(headers) = headers else {
         return vec![];
     };
@@ -955,13 +1520,13 @@ fn build_body_lines<'a>(
     lines
 }
 
-fn build_error_lines(error: &str, width: usize) -> Vec<Line> {
+fn build_error_lines(error: &str, width: usize) -> Vec<Line<'_>> {
     let mut lines = vec!["".into(), build_horizontal_line("ERROR", width)];
     lines.push(Line::raw(error));
     lines
 }
 
-fn build_websocket_message_lines(message: &WebsocketMessage, width: usize) -> Vec<Line> {
+fn build_websocket_message_lines(message: &WebsocketMessage, width: usize) -> Vec<Line<'_>> {
     match message {
         WebsocketMessage::Error(error) => build_error_lines(error, width),
         WebsocketMessage::Data(data) => {
@@ -982,58 +1547,4 @@ fn build_horizontal_line(title: &'static str, width: usize) -> Line<'static> {
         "-".repeat(width.saturating_sub(title.width()).saturating_sub(10))
             .into(),
     ])
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum View {
-    Main,
-    Details,
-}
-
-impl View {
-    fn keybindings(&self) -> &[(&str, &str)] {
-        match self {
-            View::Main => &[
-                ("↵", "Select"),
-                ("⇅", "Navigate"),
-                ("/", "Search"),
-                ("c", "Copy"),
-                ("e", "Export"),
-                ("q", "Quit"),
-            ],
-            View::Details => &[
-                ("↹", "Switch"),
-                ("⇅", "Scroll"),
-                ("n", "Next"),
-                ("p", "Prev"),
-                ("c", "Copy"),
-                ("e", "Export"),
-                ("q", "Back"),
-            ],
-        }
-    }
-}
-
-#[derive(Debug)]
-enum Message {
-    TrafficHead(TrafficHead),
-    TrafficDetails(Box<TrafficDetails>),
-    SubscribedWebSocket(Box<SubscribedWebSocket>),
-    Info(String),
-    Error(String),
-}
-
-type TrafficDetails = (Traffic, Option<Body>, Option<Body>);
-
-type Notifier = (String, bool, u64); // (message, is_error, timeout_step)
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Popup {
-    Copy(usize),
-    Export(usize),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Confirm {
-    Quit,
 }

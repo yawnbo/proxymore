@@ -2,7 +2,7 @@ use crate::{
     cert::CertificateAuthority,
     filter::{is_match_title, is_match_type, TitleFilter},
     rewind::Rewind,
-    state::State,
+    state::{PendingPhase, PendingResolution, RuleAction, State},
     traffic::{extract_mime, Traffic},
     utils::*,
 };
@@ -57,6 +57,7 @@ pub const CERT_PREFIX: &str = "http://proxyfor.local/";
 pub const WEB_PREFIX: &str = "/__proxyfor__";
 const WEB_INDEX: &str = include_str!("../assets/index.html");
 const CERT_INDEX: &str = include_str!("../assets/install-certificate.html");
+const RULE_TIMEOUT_SECONDS: usize = 300;
 
 type Request = hyper::Request<Incoming>;
 type Response = hyper::Response<BoxBody<Bytes, anyhow::Error>>;
@@ -193,7 +194,7 @@ impl Server {
 
     async fn handle(
         self: Arc<Self>,
-        req: Request,
+        mut req: Request,
         traffic_done_tx: TrafficDoneSender,
     ) -> Result<Response, hyper::Error> {
         let req_uri = req.uri().to_string();
@@ -276,11 +277,51 @@ impl Server {
 
         traffic.set_req_headers(req.headers());
 
-        if hyper_tungstenite::is_upgrade_request(&req) {
+        let is_websocket = hyper_tungstenite::is_upgrade_request(&req);
+        let rule_action = self
+            .state
+            .match_rules(method.as_str(), &uri, is_websocket)
+            .await;
+
+        if is_websocket {
             let uri: Uri = uri.parse().expect("Invalid uri");
             return self
                 .handle_upgrade_websocket(req, uri, traffic, traffic_done_tx.clone())
                 .await;
+        }
+
+        let mut modified_req_body: Option<Vec<u8>> = None;
+
+        if matches!(
+            rule_action,
+            Some(RuleAction::PauseToEditRequest) | Some(RuleAction::PauseToEditRequestAndResponse)
+        ) {
+            self.state.add_traffic_early(&traffic).await;
+            let rx = self
+                .state
+                .add_pending(traffic.gid, PendingPhase::Request)
+                .await;
+            match Self::await_pending(rx).await {
+                Err(res) => return Ok(res),
+                Ok(Some(modified)) => {
+                    if let Some(headers) = &modified.headers {
+                        let req_headers = req.headers_mut();
+                        req_headers.clear();
+                        for (name, value) in headers {
+                            if let (Ok(name), Ok(value)) = (
+                                http::header::HeaderName::from_bytes(name.as_bytes()),
+                                HeaderValue::from_str(value),
+                            ) {
+                                req_headers.append(name, value);
+                            }
+                        }
+                        traffic.set_req_headers(req.headers());
+                    }
+                    modified_req_body = modified.body;
+                    self.state.update_traffic(&traffic).await;
+                }
+                Ok(None) => {}
+            }
         }
 
         let mut builder = hyper::Request::builder().uri(&uri).method(method.clone());
@@ -292,9 +333,28 @@ impl Server {
             builder = builder.header(key.clone(), value.clone());
         }
 
-        let req_body_file = if traffic.valid {
-            match self.req_body_file(&mut traffic) {
-                Ok(v) => Some(v),
+        // if we have a modified body from the editor, use it or just stream the original
+        let proxy_req = if let Some(body_bytes) = modified_req_body {
+            let req_body_file = if traffic.valid {
+                match self.req_body_file(&mut traffic) {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        return self
+                            .internal_server_error(err, traffic, traffic_done_tx)
+                            .await;
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(mut file) = req_body_file {
+                let _ = file.write_all(&body_bytes);
+            }
+            let body = Full::new(Bytes::from(body_bytes))
+                .map_err(|err| anyhow!("{err}"))
+                .boxed();
+            match builder.body(body) {
+                Ok(v) => v,
                 Err(err) => {
                     return self
                         .internal_server_error(err, traffic, traffic_done_tx)
@@ -302,17 +362,28 @@ impl Server {
                 }
             }
         } else {
-            None
-        };
-
-        let req_body = BodyWrapper::new(req.into_body(), req_body_file, None);
-
-        let proxy_req = match builder.body(req_body) {
-            Ok(v) => v,
-            Err(err) => {
-                return self
-                    .internal_server_error(err, traffic, traffic_done_tx)
-                    .await;
+            let req_body_file = if traffic.valid {
+                match self.req_body_file(&mut traffic) {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        return self
+                            .internal_server_error(err, traffic, traffic_done_tx)
+                            .await;
+                    }
+                }
+            } else {
+                None
+            };
+            let req_body = BodyWrapper::new(req.into_body(), req_body_file, None)
+                .map_err(|e| anyhow!("{e}"))
+                .boxed();
+            match builder.body(req_body) {
+                Ok(v) => v,
+                Err(err) => {
+                    return self
+                        .internal_server_error(err, traffic, traffic_done_tx)
+                        .await;
+                }
             }
         };
 
@@ -342,7 +413,7 @@ impl Server {
             }
         };
 
-        self.process_proxy_res(proxy_res, traffic, traffic_done_tx)
+        self.process_proxy_res(proxy_res, traffic, traffic_done_tx, rule_action)
             .await
     }
 
@@ -551,7 +622,7 @@ impl Server {
                 };
 
                 tokio::spawn(fut);
-                self.process_proxy_res(proxy_res, traffic, traffic_done_tx)
+                self.process_proxy_res(proxy_res, traffic, traffic_done_tx, None)
                     .await
             }
             Err(err) => {
@@ -791,6 +862,7 @@ impl Server {
         proxy_res: hyper::Response<T>,
         mut traffic: Traffic,
         traffic_done_tx: TrafficDoneSender,
+        rule_action: Option<RuleAction>,
     ) -> Result<Response, hyper::Error> {
         let proxy_res = {
             let (parts, body) = proxy_res.into_parts();
@@ -825,6 +897,75 @@ impl Server {
 
         *res.status_mut() = proxy_res_status;
 
+        // response time pause for rules
+        if matches!(
+            rule_action,
+            Some(RuleAction::PauseToEditResponse) | Some(RuleAction::PauseToEditRequestAndResponse)
+        ) {
+            // buffer everything so that it's displayable
+            let body_bytes = match proxy_res.into_body().collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(_) => {
+                    let mut err_res = Response::default();
+                    *err_res.status_mut() = StatusCode::GATEWAY_TIMEOUT;
+                    set_res_body(&mut err_res, "Failed to buffer response body");
+                    return Ok(err_res);
+                }
+            };
+
+            // write to file 4 editability with some editor (I'm NOT writing text editing in a tui)
+            if traffic.valid {
+                match self.res_body_file(&mut traffic, &encoding) {
+                    Ok(mut file) => {
+                        let _ = file.write_all(&body_bytes);
+                        let raw_size = body_bytes.len() as u64;
+                        traffic.done_res_body(raw_size);
+                        traffic.uncompress_res_file().await;
+                    }
+                    Err(_) => {}
+                }
+            }
+
+            // if traffic was already added then update,
+            // otherwise just add it
+            if self.state.get_traffic_by_gid(traffic.gid).await.is_some() {
+                self.state.update_traffic(&traffic).await;
+            } else {
+                self.state.add_traffic_early(&traffic).await;
+            }
+
+            let rx = self
+                .state
+                .add_pending(traffic.gid, PendingPhase::Response)
+                .await;
+            match Self::await_pending(rx).await {
+                Err(err_res) => return Ok(err_res),
+                Ok(Some(modified)) => {
+                    if let Some(headers) = &modified.headers {
+                        res.headers_mut().clear();
+                        for (name, value) in headers {
+                            if let (Ok(name), Ok(value)) = (
+                                http::header::HeaderName::from_bytes(name.as_bytes()),
+                                HeaderValue::from_str(value),
+                            ) {
+                                res.headers_mut().append(name, value);
+                            }
+                        }
+                    }
+                    let final_body = modified.body.map(Bytes::from).unwrap_or(body_bytes);
+                    *res.body_mut() = Full::new(final_body)
+                        .map_err(|err| anyhow!("{err}"))
+                        .boxed();
+                }
+                Ok(None) => {
+                    *res.body_mut() = Full::new(body_bytes)
+                        .map_err(|err| anyhow!("{err}"))
+                        .boxed();
+                }
+            }
+            return Ok(res);
+        }
+
         let res_body_file = if traffic.valid {
             match self.res_body_file(&mut traffic, &encoding) {
                 Ok(v) => Some(v),
@@ -849,6 +990,27 @@ impl Server {
         self.state.add_traffic(traffic).await;
 
         Ok(res)
+    }
+
+    /// await a pending resolution with timeout. ret `Ok(modified)` on success,
+    /// or `Err(response)` with a 504 on cancel/timeout/sender-dropped
+    async fn await_pending(
+        rx: oneshot::Receiver<PendingResolution>,
+    ) -> Result<Option<crate::state::ModifiedTraffic>, Response> {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(RULE_TIMEOUT_SECONDS as u64),
+            rx,
+        )
+        .await
+        {
+            Ok(Ok(PendingResolution::Continue(modified))) => Ok(modified),
+            _ => {
+                let mut res = Response::default();
+                *res.status_mut() = StatusCode::GATEWAY_TIMEOUT;
+                set_res_body(&mut res, "Rule: cancelled or timed out");
+                Err(res)
+            }
+        }
     }
 
     async fn internal_server_error<T: std::fmt::Display>(

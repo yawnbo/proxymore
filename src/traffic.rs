@@ -225,6 +225,7 @@ impl Traffic {
     pub(crate) fn head(&self, id: usize) -> TrafficHead {
         TrafficHead {
             id,
+            gid: self.gid,
             method: self.method.clone(),
             uri: self.uri.clone(),
             status: self.status,
@@ -232,6 +233,7 @@ impl Traffic {
             time: self.time(),
             mime: extract_mime(&self.res_headers).to_string(),
             websocket_id: self.websocket_id,
+            pending: false,
         }
     }
 
@@ -325,6 +327,7 @@ impl Traffic {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrafficHead {
     pub id: usize,
+    pub gid: usize,
     pub method: String,
     pub uri: String,
     pub status: Option<u16>,
@@ -333,6 +336,8 @@ pub struct TrafficHead {
     pub mime: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub websocket_id: Option<usize>,
+    #[serde(default)]
+    pub pending: bool,
 }
 
 impl TrafficHead {
@@ -645,7 +650,7 @@ pub(crate) fn wrap_entries(entries: Vec<Value>) -> Value {
         "log": {
             "version": "1.2",
             "creator": {
-                "name": "proxyfor",
+                "name": "proxymore",
                 "version": env!("CARGO_PKG_VERSION"),
                 "comment": "",
             },

@@ -1,12 +1,12 @@
 [package]
-name = "proxyfor"
-version = "0.5.0"
+name = "proxymore"
+version = "0.6.0"
 edition = "2021"
-authors = ["sigoden <sigoden@gmail.com>"]
-description = "A powerful and flexible proxy CLI for capturing and inspecting HTTP(S) and WS(S) traffic"
+authors = ["sigoden <sigoden@gmail.com>", "yawnbo <main@yawnbo.com>"]
+description = "A powerful and flexible proxy CLI for capturing, inspecting and modifying inflight HTTP(S) and WS(S) traffic. Fork of sigoden/proxyfor."
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/sigoden/proxyfor"
-repository = "https://github.com/sigoden/proxyfor"
+homepage = "https://github.com/yawnbo/proxymore"
+repository = "https://github.com/yawnbo/proxymore"
 categories = ["command-line-utilities"]
 keywords = ["proxy", "cli", "http", "websocket", "tui"]
 
@@ -20,6 +20,7 @@ cookie = "0.18.0"
 dirs = "5.0.1"
 fancy-regex = "0.14.0"
 futures-util = "0.3.30"
+glob-match = "0.2"
 http = "1.1.0"
 http-body-util = "0.1"
 hyper = { version = "1.0", features = ["full"] }
