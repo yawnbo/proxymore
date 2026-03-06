@@ -1,7 +1,7 @@
-<h1 id="install-proxyfors-certificate-authority">Install proxyfor’s
+<h1 id="install-proxymores-certificate-authority">Install proxymore’s
 Certificate Authority</h1>
 <head>
-    <title>proxyfor</title>
+    <title>proxymore</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <style>
@@ -29,7 +29,7 @@ summary:before {
 <h2 id="windows">Windows</h2>
 </summary>
 <p><a
-href="./proxyfor-ca-cert.cer">proxyfor-ca-cert.cer</a></p>
+href="./proxymore-ca-cert.cer">proxymore-ca-cert.cer</a></p>
 <h3 id="manual-installation">Manual Installation</h3>
 <ol type="1">
 <li>Double-click the CER file to start the import wizard.</li>
@@ -47,7 +47,7 @@ Click OK and Next.</li>
 </ol>
 <h3 id="automated-installation">Automated Installation</h3>
 <ol type="1">
-<li>Run <code>certutil.exe -addstore root proxyfor-ca-cert.cer</code>
+<li>Run <code>certutil.exe -addstore root proxymore-ca-cert.cer</code>
 (<a
 href="https://technet.microsoft.com/en-us/library/cc732443.aspx">details</a>).</li>
 </ol>
@@ -57,15 +57,15 @@ href="https://technet.microsoft.com/en-us/library/cc732443.aspx">details</a>).</
 <h2 id="linux">Linux</h2>
 </summary>
 <p><a
-href="./proxyfor-ca-cert.pem">proxyfor-ca-cert.pem</a></p>
+href="./proxymore-ca-cert.pem">proxymore-ca-cert.pem</a></p>
 <h3 id="ubuntudebian">Ubuntu/Debian</h3>
 <ol type="1">
-<li><code>mv proxyfor-ca-cert.pem /usr/local/share/ca-certificates/proxyfor.crt</code></li>
+<li><code>mv proxymore-ca-cert.pem /usr/local/share/ca-certificates/proxymore.crt</code></li>
 <li><code>sudo update-ca-certificates</code></li>
 </ol>
 <h3 id="fedora">Fedora</h3>
 <ol type="1">
-<li><code>mv proxyfor-ca-cert.pem /etc/pki/ca-trust/source/anchors/</code></li>
+<li><code>mv proxymore-ca-cert.pem /etc/pki/ca-trust/source/anchors/</code></li>
 <li><code>sudo update-ca-trust</code></li>
 </ol>
 </details>
@@ -74,19 +74,19 @@ href="./proxyfor-ca-cert.pem">proxyfor-ca-cert.pem</a></p>
 <h2 id="macos">macOS</h2>
 </summary>
 <p><a
-href="./proxyfor-ca-cert.pem">proxyfor-ca-cert.pem</a></p>
+href="./proxymore-ca-cert.pem">proxymore-ca-cert.pem</a></p>
 <h3 id="manual-installation-1">Manual Installation</h3>
 <ol type="1">
 <li>Double-click the PEM file to open the Keychain Access
 application.</li>
-<li>Locate the new certificate “proxyfor” in the list and double-click
+<li>Locate the new certificate “proxymore” in the list and double-click
 it.</li>
 <li>Change Secure Socket Layer (SSL) to Always Trust.</li>
 <li>Close the dialog window and enter your password if prompted.</li>
 </ol>
 <h3 id="automated-installation-1">Automated Installation</h3>
 <ol type="1">
-<li><code>sudo security add-trusted-cert -d -p ssl -p basic -k /Library/Keychains/System.keychain proxyfor-ca-cert.pem</code></li>
+<li><code>sudo security add-trusted-cert -d -p ssl -p basic -k /Library/Keychains/System.keychain proxymore-ca-cert.pem</code></li>
 </ol>
 </details>
 <details>
@@ -94,7 +94,7 @@ it.</li>
 <h2 id="ios">iOS</h2>
 </summary>
 <p><a
-href="./proxyfor-ca-cert.pem">proxyfor-ca-cert.pem</a></p>
+href="./proxymore-ca-cert.pem">proxymore-ca-cert.pem</a></p>
 <h3 id="ios-13">iOS 13+</h3>
 <ol type="1">
 <li>Use Safari to download the certificate. Other browsers may not open
@@ -102,7 +102,7 @@ the proper installation prompt.</li>
 <li>Install the new Profile (Settings -&gt; General -&gt; VPN &amp;
 Device Management).</li>
 <li><strong>Important: Go to Settings -&gt; General -&gt; About -&gt;
-Certificate Trust Settings.</strong> Toggle proxyfor to ON.</li>
+Certificate Trust Settings.</strong> Toggle proxymore to ON.</li>
 </ol>
 </details>
 <details>
@@ -110,11 +110,11 @@ Certificate Trust Settings.</strong> Toggle proxyfor to ON.</li>
 <h2 id="android">Android</h2>
 </summary>
 <p><a
-href="./proxyfor-ca-cert.cer">proxyfor-ca-cert.cer</a></p>
+href="./proxymore-ca-cert.cer">proxymore-ca-cert.cer</a></p>
 <h3 id="android-10">Android 10+</h3>
 <ol type="1">
 <li>Open the downloaded CER file.</li>
-<li>Enter proxyfor (or anything else) as the certificate name.</li>
+<li>Enter proxymore (or anything else) as the certificate name.</li>
 <li>For credential use, select VPN and apps.</li>
 <li>Click OK.</li>
 </ol>
@@ -125,7 +125,7 @@ instead.</p>
 <p><strong>Warning:</strong> Apps that target Android API Level 24
 (introduced in 2016) and above only accept certificates from the system
 trust store (<a
-href="https://github.com/proxyfor/proxyfor/issues/2054">#2054</a>).
+href="https://github.com/proxymore/proxymore/issues/2054">#2054</a>).
 User-added CAs are not accepted unless the application manually opts in.
 Except for browsers, you need to patch most apps manually (<a
 href="https://developer.android.com/training/articles/security-config">Android
@@ -139,7 +139,7 @@ via the Magisk Manager app.</p>
 <h2 id="firefox">Firefox</h2>
 </summary>
 <p><a
-href="./proxyfor-ca-cert.pem">proxyfor-ca-cert.pem</a></p>
+href="./proxymore-ca-cert.pem">proxymore-ca-cert.pem</a></p>
 <h3 id="firefox-1">Firefox</h3>
 <ol type="1">
 <li>Open Options -&gt; Privacy &amp; Security and click View

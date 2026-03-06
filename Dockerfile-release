@@ -9,12 +9,12 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
     elif [  "$TARGETPLATFORM" = "linux/arm/v7" ]; then \
         TARGET="armv7-unknown-linux-musleabihf"; \
     fi && \
-    wget https://github.com/${REPO}/releases/download/${VER}/proxyfor-${VER}-${TARGET}.tar.gz && \
-    tar -xf proxyfor-${VER}-${TARGET}.tar.gz && \
-    mv proxyfor /bin/
+    wget https://github.com/${REPO}/releases/download/${VER}/proxymore-${VER}-${TARGET}.tar.gz && \
+    tar -xf proxymore-${VER}-${TARGET}.tar.gz && \
+    mv proxymore /bin/
 
 FROM scratch
-COPY --from=builder /bin/proxyfor /bin/proxyfor
-VOLUME /.proxyfor
+COPY --from=builder /bin/proxymore /bin/proxymore
+VOLUME /.proxymore
 STOPSIGNAL SIGINT
-ENTRYPOINT ["/bin/proxyfor"]
+ENTRYPOINT ["/bin/proxymore"]

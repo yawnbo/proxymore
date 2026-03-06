@@ -38,7 +38,7 @@ const MESSAGE_TIMEOUT: u64 = 5000;
 const LARGE_WIDTH: u16 = 100;
 const SELECTED_STYLE: Style = Style::new().bg(GRAY.c800).add_modifier(Modifier::BOLD);
 const BOLD_STYLE: Style = Style::new().add_modifier(Modifier::BOLD);
-const EXPORT_ALL_TRAFFICS: &str = "proxyfor_all_traffics";
+const EXPORT_ALL_TRAFFICS: &str = "proxymore_all_traffics";
 const ORANGE: Color = Color::Rgb(255, 165, 0);
 
 const COPY_ACTIONS: [(&str, &str); 5] = [
@@ -927,7 +927,7 @@ impl App {
             }
         };
 
-        let temp_path = format!("/tmp/proxyfor-edit-{gid}.json");
+        let temp_path = format!("/tmp/proxymore-edit-{gid}.json");
         if std::fs::write(&temp_path, &json_str).is_err() {
             self.notify("Failed to write temp file", true);
             return;
@@ -989,7 +989,7 @@ impl App {
     fn render_main_view(&mut self, frame: &mut Frame, area: Rect) {
         let traffics = self.filtered_traffics();
         let traffics_len = traffics.len();
-        let mut block = Block::bordered().title(format!("Proxyfor ({})", self.addr));
+        let mut block = Block::bordered().title(format!("proxymore ({})", self.addr));
         let mut table_state = TableState::new();
         if !traffics.is_empty() {
             let pagination = format!("[{}/{traffics_len}]", self.selected_traffic_index + 1);

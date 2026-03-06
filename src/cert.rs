@@ -161,10 +161,10 @@ fn gen_ca_cert(key: &KeyPair) -> Result<Certificate> {
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params
         .distinguished_name
-        .push(DnType::CommonName, "proxyfor");
+        .push(DnType::CommonName, "proxymore");
     params
         .distinguished_name
-        .push(DnType::OrganizationName, "proxyfor");
+        .push(DnType::OrganizationName, "proxymore");
     params.not_before = yesterday;
     params.not_after = tomorrow;
     params

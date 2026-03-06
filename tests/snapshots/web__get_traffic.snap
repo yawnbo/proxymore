@@ -103,7 +103,7 @@ Hello, World!
   "log": {
     "version":"<VERSION>",
     "creator": {
-      "name": "proxyfor",
+      "name": "proxymore",
       "version":"<VERSION>",
       "comment": ""
     },

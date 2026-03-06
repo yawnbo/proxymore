@@ -8,7 +8,7 @@ use crate::common::{
 use anyhow::Result;
 use async_http_proxy::http_connect_tokio;
 use futures_util::SinkExt;
-use proxyfor::server::WEB_PREFIX;
+use proxymore::server::WEB_PREFIX;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -31,7 +31,7 @@ async fn test_web_index() -> Result<()> {
     let status = res.status();
     let text = res.text().await?;
     assert_eq!(status, 200);
-    assert!(text.contains("<title>proxyfor</title>"));
+    assert!(text.contains("<title>proxymore</title>"));
 
     let _ = stop_proxy.send(());
     Ok(())

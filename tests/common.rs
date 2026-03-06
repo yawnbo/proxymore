@@ -18,7 +18,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto,
 };
-use proxyfor::{
+use proxymore::{
     cert::CertificateAuthority,
     server::{PrintMode, Server, ServerBuilder},
 };
@@ -151,7 +151,7 @@ pub fn build_proxy_server(web: bool) -> Result<Arc<Server>> {
 
 pub fn build_proxy_client(proxy: &str) -> Result<reqwest::Client> {
     let proxy = reqwest::Proxy::all(proxy)?;
-    let ca_cert_file = resolve_fixture_path("proxyfor-ca-cert.cer");
+    let ca_cert_file = resolve_fixture_path("proxymore-ca-cert.cer");
     let ca_cert_data = std::fs::read_to_string(ca_cert_file)?;
     let ca_cert = reqwest::tls::Certificate::from_pem(ca_cert_data.as_bytes())?;
 
@@ -167,7 +167,7 @@ pub fn build_proxy_client(proxy: &str) -> Result<reqwest::Client> {
 }
 
 pub fn build_client() -> Result<reqwest::Client> {
-    let ca_cert_file = resolve_fixture_path("proxyfor-ca-cert.cer");
+    let ca_cert_file = resolve_fixture_path("proxymore-ca-cert.cer");
     let ca_cert_data = std::fs::read_to_string(ca_cert_file)?;
     let ca_cert = reqwest::tls::Certificate::from_pem(ca_cert_data.as_bytes())?;
 
@@ -182,9 +182,9 @@ pub fn build_client() -> Result<reqwest::Client> {
 }
 
 pub fn build_ca() -> Result<CertificateAuthority> {
-    let ca_cert_file = resolve_fixture_path("proxyfor-ca-cert.cer");
-    let private_key_file = resolve_fixture_path("proxyfor-key.pem");
-    let ca = proxyfor::cert::init_ca(&ca_cert_file, &private_key_file)?;
+    let ca_cert_file = resolve_fixture_path("proxymore-ca-cert.cer");
+    let private_key_file = resolve_fixture_path("proxymore-key.pem");
+    let ca = proxymore::cert::init_ca(&ca_cert_file, &private_key_file)?;
     Ok(ca)
 }
 

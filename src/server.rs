@@ -53,8 +53,8 @@ use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_tungstenite::tungstenite;
 
-pub const CERT_PREFIX: &str = "http://proxyfor.local/";
-pub const WEB_PREFIX: &str = "/__proxyfor__";
+pub const CERT_PREFIX: &str = "http://proxymore.local/";
+pub const WEB_PREFIX: &str = "/__proxymore__";
 const WEB_INDEX: &str = include_str!("../assets/index.html");
 const CERT_INDEX: &str = include_str!("../assets/install-certificate.html");
 const RULE_TIMEOUT_SECONDS: usize = 300;
@@ -109,7 +109,7 @@ impl ServerBuilder {
     }
 
     pub fn build(self) -> Arc<Server> {
-        let temp_dir = std::env::temp_dir().join(format!("proxyfor-{}", process::id()));
+        let temp_dir = std::env::temp_dir().join(format!("proxymore-{}", process::id()));
         info!(
             "reverse_proxy_url={:?}, title_filters={:?}, mime_filters={:?}, web={}, temp_dir={}",
             self.reverse_proxy_url,
@@ -424,7 +424,7 @@ impl Server {
                 CONTENT_TYPE,
                 HeaderValue::from_static("text/html; charset=UTF-8"),
             );
-        } else if path == "proxyfor-ca-cert.cer" || path == "proxyfor-ca-cert.pem" {
+        } else if path == "proxymore-ca-cert.cer" || path == "proxymore-ca-cert.pem" {
             let body = self.ca.ca_cert_pem();
             set_res_body(res, body);
             res.headers_mut().insert(

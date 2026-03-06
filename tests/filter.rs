@@ -6,7 +6,7 @@ use crate::common::{
 };
 
 use anyhow::Result;
-use proxyfor::{
+use proxymore::{
     filter::parse_title_filters,
     server::{PrintMode, ServerBuilder, WEB_PREFIX},
 };

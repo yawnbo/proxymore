@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-use proxyfor::{
+use proxymore::{
     cert::{init_ca, CertificateAuthority},
     filter::parse_title_filters,
     server::{PrintMode, ServerBuilder, WEB_PREFIX},
@@ -19,8 +19,8 @@ use std::{
 };
 use tokio::net::TcpListener;
 
-const CA_CERT_FILENAME: &str = "proxyfor-ca-cert.cer";
-const PRIVATE_KEY_FILENAME: &str = "proxyfor-key.pem";
+const CA_CERT_FILENAME: &str = "proxymore-ca-cert.cer";
+const PRIVATE_KEY_FILENAME: &str = "proxymore-key.pem";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -129,7 +129,7 @@ fn setup_logger(config_dir: &Path) -> Result<()> {
 
 fn ensure_config_dir() -> Result<PathBuf> {
     let mut config_dir = dirs::home_dir().ok_or_else(|| anyhow!("No home dir"))?;
-    config_dir.push(".proxyfor");
+    config_dir.push(".proxymore");
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir).map_err(|err| {
             anyhow!(

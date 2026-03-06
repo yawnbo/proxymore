@@ -9,7 +9,7 @@ RUN cargo install --path . --root /
 FROM ${TARGETARCH} AS builder
 
 FROM scratch
-COPY --from=builder /bin/proxyfor /bin/proxyfor
-VOLUME /.proxyfor
+COPY --from=builder /bin/proxymore /bin/proxymore
+VOLUME /.proxymore
 STOPSIGNAL SIGINT
-ENTRYPOINT ["/bin/proxyfor"]
+ENTRYPOINT ["/bin/proxymore"]

@@ -8,7 +8,7 @@ use crate::common::{
 use anyhow::Result;
 use async_http_proxy::http_connect_tokio;
 use futures_util::{SinkExt, StreamExt};
-use proxyfor::server::{PrintMode, ServerBuilder};
+use proxymore::server::{PrintMode, ServerBuilder};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 

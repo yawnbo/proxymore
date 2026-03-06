@@ -1,7 +1,7 @@
 mod common;
 
 use crate::common::{build_proxy_client, start_http_server, start_proxy};
-use proxyfor::server::CERT_PREFIX;
+use proxymore::server::CERT_PREFIX;
 
 use anyhow::Result;
 
@@ -30,7 +30,7 @@ async fn test_cert_cer() -> Result<()> {
     let client = build_proxy_client(&proxy_addr.to_string())?;
 
     let res = client
-        .get(format!("{}proxyfor-ca-cert.cer", CERT_PREFIX))
+        .get(format!("{}proxymore-ca-cert.cer", CERT_PREFIX))
         .send()
         .await?;
 
@@ -50,7 +50,7 @@ async fn test_cert_pem() -> Result<()> {
     let client = build_proxy_client(&proxy_addr.to_string())?;
 
     let res = client
-        .get(format!("{}proxyfor-ca-cert.pem", CERT_PREFIX))
+        .get(format!("{}proxymore-ca-cert.pem", CERT_PREFIX))
         .send()
         .await?;
 
