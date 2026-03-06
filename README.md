@@ -1,16 +1,18 @@
 # proxymore
 
-[![CI](https://github.com/sigoden/proxymore/actions/workflows/ci.yaml/badge.svg)](https://github.com/sigoden/proxymore/actions/workflows/ci.yaml)
+[![CI](https://github.com/yawnbo/proxymore/actions/workflows/ci.yaml/badge.svg)](https://github.com/sigoden/proxymore/actions/workflows/ci.yaml)
 [![Crates](https://img.shields.io/crates/v/proxymore.svg)](https://crates.io/crates/proxymore)
-[![Docker Pulls](https://img.shields.io/docker/pulls/sigoden/proxymore)](https://hub.docker.com/r/sigoden/proxymore)
+[![Docker Pulls](https://img.shields.io/docker/pulls/sigoden/proxyfor)](https://hub.docker.com/r/sigoden/proxyfor)
 
-A powerful and flexible proxy CLI for capturing and inspecting HTTP(S) and WS(S) traffic.
+A powerful and flexible proxy CLI for capturing and inspecting and rewriting inflight HTTP(S) and WS(S) traffic.
 
+This is a fork of sigoden/proxyfor with slightly extended features, sigoden let me know if you would prefer a pr :)
 ## Features
 
 - Supports forward/reverse proxy
 - Provides TUI & WebUI
 - Enables filtering & searching
+- Support rules for intercepting requests and rewriting before forwarding
 - Handles HTTP/HTTPS/WS/WSS protocols
 - Comes with a tool for installing CA certificates
 - Allows export in Markdown, cURL, or HAR formats
@@ -36,12 +38,12 @@ cargo install proxymore
 ### With docker
 
 ```
-docker run -v ~/.proxymore:/.proxymore -p 8080:8080 --rm sigoden/proxymore --web 
+docker run -v ~/.proxymore:/.proxymore -p 8080:8080 --rm sigoden/proxyfor --web 
 ```
 
 ### Binaries on macOS, Linux, Windows
 
-Download from [Github Releases](https://github.com/sigoden/proxymore/releases), unzip and add proxymore to your $PATH.
+Download from [Github Releases](https://github.com/yawnbo/proxymore/releases), unzip and add proxymore to your $PATH.
 
 ## Proxy Modes Explained
 
