@@ -1,6 +1,6 @@
 [package]
 name = "proxymore"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 authors = ["sigoden <sigoden@gmail.com>", "yawnbo <main@yawnbo.com>"]
 description = "A powerful and flexible proxy CLI for capturing, inspecting and modifying inflight HTTP(S) and WS(S) traffic. Fork of sigoden/proxyfor."
