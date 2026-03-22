@@ -1,6 +1,6 @@
 # proxymore
 
-[![CI](https://github.com/yawnbo/proxymore/actions/workflows/ci.yaml/badge.svg)](https://github.com/sigoden/proxymore/actions/workflows/ci.yaml)
+[![CI](https://github.com/yawnbo/proxymore/actions/workflows/ci.yaml/badge.svg)](https://github.com/yawnbo/proxymore/actions/workflows/ci.yaml)
 [![Crates](https://img.shields.io/crates/v/proxymore.svg)](https://crates.io/crates/proxymore)
 [![Docker Pulls](https://img.shields.io/docker/pulls/sigoden/proxyfor)](https://hub.docker.com/r/sigoden/proxyfor)
 
@@ -131,7 +131,7 @@ To decrypt HTTPS traffic, you must install `proxymore`'s CA certificate on your 
 3. Open a web browser on the target device and navigate to [proxymore.local](http://proxymore.local).
 4. Follow the on-screen instructions to download and install the CA certificate.
 
-![proxymore.local](https://github.com/sigoden/proxymore/assets/4012553/a5276872-8ab1-4794-9e97-ac7038ca5e4a)
+![proxymore.local](https://github.com/yawnbo/proxymore/assets/4012553/a5276872-8ab1-4794-9e97-ac7038ca5e4a)
 
 ## License
 
