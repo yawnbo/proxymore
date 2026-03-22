@@ -7,30 +7,36 @@ expression: output
 [
   {
     "id": 1,
+    "gid":<GID>,
     "method": "GET",
     "uri": "http://localhost:<PORT>/hello",
     "status": 200,
     "size": 13,
     "time":<TIME>,
-    "mime": ""
+    "mime": "",
+    "pending": false
   },
   {
     "id": 2,
+    "gid":<GID>,
     "method": "GET",
     "uri": "http://localhost:<PORT>/hello/gzip",
     "status": 200,
     "size": 33,
     "time":<TIME>,
-    "mime": ""
+    "mime": "",
+    "pending": false
   },
   {
     "id": 3,
+    "gid":<GID>,
     "method": "POST",
     "uri": "http://localhost:<PORT>/echo",
     "status": 200,
     "size": 13,
     "time":<TIME>,
-    "mime": "text/plain"
+    "mime": "text/plain",
+    "pending": false
   }
 ]
 

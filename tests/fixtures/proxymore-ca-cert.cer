@@ -1,7 +1,3 @@
----
-source: tests/cert.rs
-expression: res.text().await?
----
 -----BEGIN CERTIFICATE-----
 MIIDNjCCAh6gAwIBAgIURiwb8VznjVdzIRbd1cryRYgkyBEwDQYJKoZIhvcNAQEL
 BQAwKDESMBAGA1UEAwwJcHJveHltb3JlMRIwEAYDVQQKDAlwcm94eW1vcmUwHhcN

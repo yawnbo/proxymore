@@ -5,11 +5,13 @@ expression: output
 [
   {
     "id": 1,
+    "gid":<GID>,
     "method": "POST",
     "uri": "http://localhost:<PORT>/echo",
     "status": 200,
     "size": 2,
     "time":<TIME>,
-    "mime": "application/json"
+    "mime": "application/json",
+    "pending": false
   }
 ]
