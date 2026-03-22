@@ -2,7 +2,7 @@ use crate::{
     cert::CertificateAuthority,
     filter::{is_match_title, is_match_type, TitleFilter},
     rewind::Rewind,
-    state::{PendingPhase, PendingResolution, RuleAction, State},
+    state::{ModifiedTraffic, PendingPhase, PendingResolution, RuleAction, State},
     traffic::{extract_mime, Traffic},
     utils::*,
 };
@@ -304,19 +304,8 @@ impl Server {
             match Self::await_pending(rx).await {
                 Err(res) => return Ok(res),
                 Ok(Some(modified)) => {
-                    if let Some(headers) = &modified.headers {
-                        let req_headers = req.headers_mut();
-                        req_headers.clear();
-                        for (name, value) in headers {
-                            if let (Ok(name), Ok(value)) = (
-                                http::header::HeaderName::from_bytes(name.as_bytes()),
-                                HeaderValue::from_str(value),
-                            ) {
-                                req_headers.append(name, value);
-                            }
-                        }
-                        traffic.set_req_headers(req.headers());
-                    }
+                    Self::apply_modified_headers(req.headers_mut(), &modified);
+                    traffic.set_req_headers(req.headers());
                     modified_req_body = modified.body;
                     self.state.update_traffic(&traffic).await;
                 }
@@ -941,17 +930,7 @@ impl Server {
             match Self::await_pending(rx).await {
                 Err(err_res) => return Ok(err_res),
                 Ok(Some(modified)) => {
-                    if let Some(headers) = &modified.headers {
-                        res.headers_mut().clear();
-                        for (name, value) in headers {
-                            if let (Ok(name), Ok(value)) = (
-                                http::header::HeaderName::from_bytes(name.as_bytes()),
-                                HeaderValue::from_str(value),
-                            ) {
-                                res.headers_mut().append(name, value);
-                            }
-                        }
-                    }
+                    Self::apply_modified_headers(res.headers_mut(), &modified);
                     let final_body = modified.body.map(Bytes::from).unwrap_or(body_bytes);
                     *res.body_mut() = Full::new(final_body)
                         .map_err(|err| anyhow!("{err}"))
@@ -994,9 +973,31 @@ impl Server {
 
     /// await a pending resolution with timeout. ret `Ok(modified)` on success,
     /// or `Err(response)` with a 504 on cancel/timeout/sender-dropped
+    /// apply modified headers and strip encoding headers when body was changed.
+    ///
+    /// This modifies the returned response by stripping these which isn't great for a proxy, but I'm not sure
+    /// if it's better to just recompressing
+    fn apply_modified_headers(headers: &mut http::HeaderMap, modified: &ModifiedTraffic) {
+        if let Some(new_headers) = &modified.headers {
+            headers.clear();
+            for (name, value) in new_headers {
+                if let (Ok(name), Ok(value)) = (
+                    http::header::HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_str(value),
+                ) {
+                    headers.append(name, value);
+                }
+            }
+        }
+        if modified.body.is_some() {
+            headers.remove(http::header::CONTENT_ENCODING);
+            headers.remove(http::header::CONTENT_LENGTH);
+        }
+    }
+
     async fn await_pending(
         rx: oneshot::Receiver<PendingResolution>,
-    ) -> Result<Option<crate::state::ModifiedTraffic>, Response> {
+    ) -> Result<Option<ModifiedTraffic>, Response> {
         match tokio::time::timeout(
             std::time::Duration::from_secs(RULE_TIMEOUT_SECONDS as u64),
             rx,

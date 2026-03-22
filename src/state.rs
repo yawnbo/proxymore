@@ -8,7 +8,11 @@ use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use time::OffsetDateTime;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio_tungstenite::tungstenite;
@@ -22,6 +26,7 @@ pub struct State {
     traffics_notifier: broadcast::Sender<TrafficHead>,
     websockets: Mutex<IndexMap<usize, Vec<WebsocketMessage>>>,
     websockets_notifier: broadcast::Sender<(usize, WebsocketMessage)>,
+    paused: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +127,17 @@ impl Rule {
             return false;
         }
         match &self.uri_pattern {
-            Some(pattern) => glob_match::glob_match(pattern, uri),
+            Some(pattern) => {
+                if glob_match::glob_match(pattern, uri) {
+                    return true;
+                }
+                // if it's not a glob then I'll just check using contains
+                if !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[') {
+                    uri.contains(pattern.as_str())
+                } else {
+                    false
+                }
+            }
             None => true,
         }
     }
@@ -241,7 +256,17 @@ impl State {
             traffics_notifier,
             websockets: Default::default(),
             websockets_notifier,
+            paused: AtomicBool::new(false),
         }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    pub fn toggle_paused(&self) -> bool {
+        let was = self.paused.fetch_xor(true, Ordering::Relaxed);
+        !was
     }
 
     pub async fn list_rules(&self) -> Vec<Rule> {
@@ -324,7 +349,7 @@ impl State {
     // --- end of bullshit that i have to implement for the type ---
 
     pub async fn add_traffic(&self, traffic: Traffic) {
-        if !traffic.valid {
+        if !traffic.valid || self.is_paused() {
             return;
         }
         let mut traffics = self.traffics.lock().await;

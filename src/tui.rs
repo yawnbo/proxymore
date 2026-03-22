@@ -34,7 +34,7 @@ use tui_input::{backend::crossterm::EventHandler, Input};
 use unicode_width::UnicodeWidthStr;
 
 const TICK_INTERVAL: u64 = 250;
-const MESSAGE_TIMEOUT: u64 = 5000;
+const MESSAGE_TIMEOUT: u64 = 600;
 const LARGE_WIDTH: u16 = 100;
 const SELECTED_STYLE: Style = Style::new().bg(GRAY.c800).add_modifier(Modifier::BOLD);
 const BOLD_STYLE: Style = Style::new().add_modifier(Modifier::BOLD);
@@ -62,7 +62,7 @@ enum View {
 }
 
 impl View {
-    fn keybindings(&self, has_pending: bool) -> Vec<(&str, &str, Option<Color>)> {
+    fn keybindings(&self, has_pending: bool, paused: bool) -> Vec<(&str, &str, Option<Color>)> {
         match self {
             View::Main => {
                 let mut bindings = vec![
@@ -73,9 +73,11 @@ impl View {
                     ("e", "Export", None),
                     ("r", "Rules", None),
                 ];
-                // rule matchers can be resolved to the default quickly like this if you're
-                // matching too much, glob matching is usually enough but let me know if you have
-                // issues with this and would like regex matching (I can't write regex)
+                if paused {
+                    bindings.push(("p", "Paused", Some(ORANGE)));
+                } else {
+                    bindings.push(("p", "Pause", None));
+                }
                 if has_pending {
                     bindings.push(("f", "Forward", Some(ORANGE)));
                 }
@@ -191,6 +193,7 @@ struct App {
     step: u64,
     rules_cache: Vec<Rule>,
     pending_edit: Option<PendingEdit>,
+    table_state: TableState,
 }
 
 impl App {
@@ -217,6 +220,7 @@ impl App {
             step: 0,
             rules_cache: vec![],
             pending_edit: None,
+            table_state: TableState::new(),
         }
     }
 
@@ -430,7 +434,19 @@ impl App {
                         self.update_current_traffic();
                     }
                 } else {
+                    let effective_len = self
+                        .filtered_traffic_indices
+                        .as_ref()
+                        .map_or(self.traffics.len(), |v| v.len());
+                    let at_bottom = effective_len == 0
+                        || self.selected_traffic_index >= effective_len.saturating_sub(1);
                     self.traffics.push(head);
+                    if at_bottom
+                        && self.current_view == View::Main
+                        && self.filtered_traffic_indices.is_none()
+                    {
+                        self.selected_traffic_index = self.traffics.len() - 1;
+                    }
                 }
             }
             Message::TrafficDetails(mut details) => {
@@ -471,11 +487,9 @@ impl App {
                     return Ok(());
                 }
                 if self.input_mode {
-                    // Check if we're in the Rules URI input mode
                     if let Some(Popup::Rules(RulesPopupState::NewUri(_, _))) = &self.current_popup {
                         match key.code {
                             KeyCode::Esc => {
-                                // Go back to matcher selection
                                 self.current_popup =
                                     Some(Popup::Rules(RulesPopupState::NewMatcher(0)));
                                 self.input_mode = false;
@@ -600,6 +614,20 @@ impl App {
                             }
                         }
                     }
+                    KeyCode::Char('p') => {
+                        if self.current_popup.is_none() && self.current_view == View::Main {
+                            let now_paused = self.state.toggle_paused();
+                            if now_paused {
+                                self.notify("Traffic collection paused", false);
+                            } else {
+                                self.notify("Traffic collection resumed", false);
+                            }
+                        } else if self.current_view == View::Details {
+                            self.selected_traffic_index =
+                                prev_idx(self.traffics.len(), self.selected_traffic_index);
+                            self.update_current_traffic();
+                        }
+                    }
                     KeyCode::Char('r') => {
                         if self.current_popup.is_some() {
                             self.current_popup = None;
@@ -622,8 +650,10 @@ impl App {
                         } else {
                             match self.current_view {
                                 View::Main => {
-                                    self.selected_traffic_index =
-                                        next_idx(self.traffics.len(), self.selected_traffic_index);
+                                    let len = self.filtered_traffics().len();
+                                    if self.selected_traffic_index < len.saturating_sub(1) {
+                                        self.selected_traffic_index += 1;
+                                    }
                                 }
                                 View::Details => {
                                     if let Some(size) = self.details_scroll_size {
@@ -653,8 +683,9 @@ impl App {
                         } else {
                             match self.current_view {
                                 View::Main => {
-                                    self.selected_traffic_index =
-                                        prev_idx(self.traffics.len(), self.selected_traffic_index);
+                                    if self.selected_traffic_index > 0 {
+                                        self.selected_traffic_index -= 1;
+                                    }
                                 }
                                 View::Details => {
                                     if let Some(size) = self.details_scroll_size {
@@ -668,6 +699,17 @@ impl App {
                                     }
                                 }
                             }
+                        }
+                    }
+                    KeyCode::Char('g') => {
+                        if self.current_popup.is_none() && self.current_view == View::Main {
+                            self.selected_traffic_index = 0;
+                        }
+                    }
+                    KeyCode::Char('G') => {
+                        if self.current_popup.is_none() && self.current_view == View::Main {
+                            let len = self.filtered_traffics().len();
+                            self.selected_traffic_index = len.saturating_sub(1);
                         }
                     }
                     KeyCode::Enter => {
@@ -704,13 +746,6 @@ impl App {
                         if self.current_view == View::Details {
                             self.selected_traffic_index =
                                 next_idx(self.traffics.len(), self.selected_traffic_index);
-                            self.update_current_traffic();
-                        }
-                    }
-                    KeyCode::Char('p') => {
-                        if self.current_view == View::Details {
-                            self.selected_traffic_index =
-                                prev_idx(self.traffics.len(), self.selected_traffic_index);
                             self.update_current_traffic();
                         }
                     }
@@ -987,14 +1022,27 @@ impl App {
     }
 
     fn render_main_view(&mut self, frame: &mut Frame, area: Rect) {
+        let traffics_len = self.filtered_traffics().len();
+
+        // Update table state before borrowing traffics for rendering.
+        self.table_state.select(Some(self.selected_traffic_index));
+        // Scroll so the selected row gravitates toward the middle of the
+        // viewport instead of sticking to the bottom edge.
+        let row_height = if area.width > LARGE_WIDTH { 1 } else { 2 };
+        let visible_items = area.height.saturating_sub(2) as usize / row_height;
+        let middle = visible_items / 2;
+        if self.selected_traffic_index >= middle {
+            let max_offset = traffics_len.saturating_sub(visible_items);
+            *self.table_state.offset_mut() = (self.selected_traffic_index - middle).min(max_offset);
+        } else {
+            *self.table_state.offset_mut() = 0;
+        }
+
         let traffics = self.filtered_traffics();
-        let traffics_len = traffics.len();
         let mut block = Block::bordered().title(format!("proxymore ({})", self.addr));
-        let mut table_state = TableState::new();
         if !traffics.is_empty() {
             let pagination = format!("[{}/{traffics_len}]", self.selected_traffic_index + 1);
             block = block.title_bottom(Line::raw(pagination).alignment(Alignment::Right));
-            table_state.select(Some(self.selected_traffic_index));
         };
         let show_scrollbar = if area.width > LARGE_WIDTH {
             let method_width = 4;
@@ -1051,7 +1099,7 @@ impl App {
             .row_highlight_style(SELECTED_STYLE)
             .block(block);
 
-            frame.render_stateful_widget(table, area, &mut table_state);
+            frame.render_stateful_widget(table, area, &mut self.table_state);
 
             traffics_len > area.height.saturating_sub(2) as usize
         } else {
@@ -1090,7 +1138,7 @@ impl App {
                 .row_highlight_style(SELECTED_STYLE)
                 .block(block);
 
-            frame.render_stateful_widget(table, area, &mut table_state);
+            frame.render_stateful_widget(table, area, &mut self.table_state);
 
             let sub = if area.height % 2 == 0 { 2 } else { 3 };
             traffics_len > (area.height.saturating_sub(sub) / 2) as usize
@@ -1190,7 +1238,8 @@ impl App {
 
     fn render_help_banner(&self, frame: &mut Frame, area: Rect) {
         let has_pending = self.selected_traffic().map(|h| h.pending).unwrap_or(false);
-        let keybindings = self.current_view.keybindings(has_pending);
+        let paused = self.state.is_paused();
+        let keybindings = self.current_view.keybindings(has_pending, paused);
         let style = Style::default().dim();
         let spans = keybindings
             .iter()
