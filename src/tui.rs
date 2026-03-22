@@ -1140,7 +1140,7 @@ impl App {
 
             frame.render_stateful_widget(table, area, &mut self.table_state);
 
-            let sub = if area.height % 2 == 0 { 2 } else { 3 };
+            let sub = if area.height.is_multiple_of(2) { 2 } else { 3 };
             traffics_len > (area.height.saturating_sub(sub) / 2) as usize
         };
 

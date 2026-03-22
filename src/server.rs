@@ -903,15 +903,13 @@ impl Server {
             };
 
             // write to file 4 editability with some editor (I'm NOT writing text editing in a tui)
+
             if traffic.valid {
-                match self.res_body_file(&mut traffic, &encoding) {
-                    Ok(mut file) => {
-                        let _ = file.write_all(&body_bytes);
-                        let raw_size = body_bytes.len() as u64;
-                        traffic.done_res_body(raw_size);
-                        traffic.uncompress_res_file().await;
-                    }
-                    Err(_) => {}
+                if let Ok(mut file) = self.res_body_file(&mut traffic, &encoding) {
+                    let _ = file.write_all(&body_bytes);
+                    let raw_size = body_bytes.len() as u64;
+                    traffic.done_res_body(raw_size);
+                    traffic.uncompress_res_file().await;
                 }
             }
 
