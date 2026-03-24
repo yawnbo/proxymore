@@ -316,7 +316,18 @@ impl Server {
         let mut builder = hyper::Request::builder().uri(&uri).method(method.clone());
 
         for (key, value) in req.headers().iter() {
-            if matches!(key, &HOST | &CONNECTION | &PROXY_AUTHORIZATION) {
+            // this is a clippy mess and should probably be fixed
+            if matches!(
+                key,
+                &HOST
+                    | &CONNECTION
+                    | &PROXY_AUTHORIZATION
+                    | &http::header::TRANSFER_ENCODING
+                    | &http::header::UPGRADE
+            ) || key == http::header::TE
+                || key == "keep-alive"
+                || key == "proxy-connection"
+            {
                 continue;
             }
             builder = builder.header(key.clone(), value.clone());
