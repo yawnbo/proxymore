@@ -386,7 +386,7 @@ impl Server {
             // Stream the original body through, recording to file as it passes
             let body_stream = http_body_util::BodyStream::new(req.into_body())
                 .try_filter_map(|frame| async { Ok(frame.into_data().ok()) })
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                .map_err(|e| std::io::Error::other(e.to_string()));
 
             let body_stream = RecordingStream::new(body_stream, req_body_file);
             wreq_req = wreq_req.body(wreq::Body::wrap_stream(body_stream));
@@ -648,10 +648,8 @@ impl Server {
         let uri = req.uri().to_string();
         let mut ws_req = self.wreq_client.websocket(&uri);
         for (key, value) in req.headers().iter() {
-            if matches!(
-                key,
-                &HOST | &CONNECTION | &PROXY_AUTHORIZATION
-            ) || key == "sec-websocket-key"
+            if matches!(key, &HOST | &CONNECTION | &PROXY_AUTHORIZATION)
+                || key == "sec-websocket-key"
                 || key == "sec-websocket-version"
                 || key == "sec-websocket-extensions"
             {
@@ -665,8 +663,10 @@ impl Server {
         let (to_client_sink, from_client_stream) = client_to_server_socket.split();
 
         // Use channels to bridge wreq's !Unpin WebSocket with tungstenite's split interface
-        let (upstream_tx, mut upstream_rx) = tokio::sync::mpsc::unbounded_channel::<tungstenite::Message>();
-        let (downstream_tx, mut downstream_rx) = tokio::sync::mpsc::unbounded_channel::<tungstenite::Message>();
+        let (upstream_tx, mut upstream_rx) =
+            tokio::sync::mpsc::unbounded_channel::<tungstenite::Message>();
+        let (downstream_tx, mut downstream_rx) =
+            tokio::sync::mpsc::unbounded_channel::<tungstenite::Message>();
 
         // Task: bridge wreq upstream WebSocket <-> channels
         let server_ws = self.clone();
@@ -720,7 +720,10 @@ impl Server {
             while let Some(message) = from_client_stream.next().await {
                 match message {
                     Ok(message) => {
-                        server_c2s.state.add_websocket_message(id, &message, false).await;
+                        server_c2s
+                            .state
+                            .add_websocket_message(id, &message, false)
+                            .await;
                         let is_close = message.is_close();
                         if upstream_tx.send(message).is_err() || is_close {
                             break;
@@ -728,7 +731,10 @@ impl Server {
                     }
                     Err(err) => {
                         if !ignore_tungstenite_error(&err) {
-                            server_c2s.state.add_websocket_error(id, format!("Client WS error: {err}")).await;
+                            server_c2s
+                                .state
+                                .add_websocket_error(id, format!("Client WS error: {err}"))
+                                .await;
                         }
                         let _ = upstream_tx.send(tungstenite::Message::Close(None));
                         break;
@@ -743,7 +749,9 @@ impl Server {
             while let Some(message) = downstream_rx.recv().await {
                 if let Err(err) = to_client_sink.send(message).await {
                     if !ignore_tungstenite_error(&err) {
-                        self.state.add_websocket_error(id, format!("Client WS send error: {err}")).await;
+                        self.state
+                            .add_websocket_error(id, format!("Client WS send error: {err}"))
+                            .await;
                     }
                     break;
                 }
@@ -752,7 +760,6 @@ impl Server {
 
         Ok(())
     }
-
 
     fn handle_connect(
         self: Arc<Self>,
@@ -1270,35 +1277,31 @@ fn ignore_tungstenite_error(err: &tungstenite::Error) -> bool {
 
 fn wreq_to_tungstenite(msg: wreq::ws::message::Message) -> tungstenite::Message {
     match msg {
-        wreq::ws::message::Message::Text(s) => {
-            tungstenite::Message::Text(s.as_str().into())
-        }
+        wreq::ws::message::Message::Text(s) => tungstenite::Message::Text(s.as_str().into()),
         wreq::ws::message::Message::Binary(b) => tungstenite::Message::Binary(b),
         wreq::ws::message::Message::Ping(d) => tungstenite::Message::Ping(d),
         wreq::ws::message::Message::Pong(d) => tungstenite::Message::Pong(d),
-        wreq::ws::message::Message::Close(frame) => tungstenite::Message::Close(frame.map(|f| {
-            tungstenite::protocol::CloseFrame {
+        wreq::ws::message::Message::Close(frame) => {
+            tungstenite::Message::Close(frame.map(|f| tungstenite::protocol::CloseFrame {
                 code: u16::from(f.code).into(),
                 reason: f.reason.as_str().into(),
-            }
-        })),
+            }))
+        }
     }
 }
 
 fn tungstenite_to_wreq(msg: tungstenite::Message) -> wreq::ws::message::Message {
     match msg {
-        tungstenite::Message::Text(s) => {
-            wreq::ws::message::Message::Text(s.as_str().into())
-        }
+        tungstenite::Message::Text(s) => wreq::ws::message::Message::Text(s.as_str().into()),
         tungstenite::Message::Binary(b) => wreq::ws::message::Message::Binary(b),
         tungstenite::Message::Ping(d) => wreq::ws::message::Message::Ping(d),
         tungstenite::Message::Pong(d) => wreq::ws::message::Message::Pong(d),
-        tungstenite::Message::Close(frame) => wreq::ws::message::Message::Close(frame.map(|f| {
-            wreq::ws::message::CloseFrame {
+        tungstenite::Message::Close(frame) => {
+            wreq::ws::message::Message::Close(frame.map(|f| wreq::ws::message::CloseFrame {
                 code: wreq::ws::message::CloseCode::from(u16::from(f.code)),
                 reason: f.reason.as_str().into(),
-            }
-        })),
+            }))
+        }
         tungstenite::Message::Frame(_) => wreq::ws::message::Message::Close(None),
     }
 }
