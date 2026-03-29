@@ -11,6 +11,7 @@ This is a fork of sigoden/proxyfor with slightly extended features, sigoden let 
 
 - Supports forward/reverse proxy
 - Provides TUI & WebUI
+- Uses boringSSL for proxy->server communication bypassing TLS fingerprinting.
 - Enables filtering & searching
 - Support rules for intercepting requests and rewriting before forwarding
 - Handles HTTP/HTTPS/WS/WSS protocols
@@ -75,6 +76,7 @@ Arguments:
 
 Options:
   -l, --listen <ADDR>         Listening ip and port address [default: 0.0.0.0:8080]
+  -E, --emulation <BROWSER>   Browser to emulate, options include firefox, chrome, opera, and safari. (default firefox)
   -f, --filters <REGEX>       Only inspect http(s) traffic whose `{method} {uri}` matches the regex
   -m, --mime-filters <VALUE>  Only inspect http(s) traffic whose content-type matches the value
   -W, --web                   Enable user-friendly web interface
@@ -122,6 +124,8 @@ proxymore -m application/json -m application/ld+json
 proxymore -m text/
 ```
 
+## Known Issues
+Something with proton mail doesn't like the verification that's being done and I get 401s or 403s.
 ## CA Certificate Installation
 
 To decrypt HTTPS traffic, you must install `proxymore`'s CA certificate on your device. The easiest way to do this is to use the built-in certificate installation app.
