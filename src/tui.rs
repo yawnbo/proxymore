@@ -67,7 +67,7 @@ impl View {
             View::Main => {
                 let mut bindings = vec![
                     ("↵", "Select", None),
-                    ("⇅", "Navigate", None),
+                    // ("⇅", "Navigate", None),
                     ("/", "Search", None),
                     ("c", "Copy", None),
                     ("e", "Export", None),

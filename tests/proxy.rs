@@ -1,14 +1,15 @@
 mod common;
 
 use crate::common::{
-    build_ca, build_client, build_proxy_client, run_proxy_server, start_http_server, start_proxy,
-    HELLO_WORLD,
+    build_ca, build_client, build_proxy_client, build_proxy_server_with_emulation,
+    run_proxy_server, start_http_server, start_https_server, start_proxy, HELLO_WORLD,
 };
 
 use anyhow::Result;
 use async_http_proxy::http_connect_tokio;
 use futures_util::{SinkExt, StreamExt};
 use proxymore::server::{PrintMode, ServerBuilder};
+use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -117,6 +118,71 @@ async fn test_reverse_websocket() -> Result<()> {
         .map(|v| v.to_string())
         .unwrap_or_default();
     assert_eq!(message, common::WORLD);
+
+    let _ = stop_server.send(());
+    let _ = stop_proxy.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_https_fingerprint() -> Result<()> {
+    let (server_addr, stop_server) = start_https_server().await?;
+
+    // Start proxy with Firefox emulation
+    let server = build_proxy_server_with_emulation(false, wreq_util::Emulation::Firefox147)?;
+    let (proxy_addr, stop_proxy) = run_proxy_server(server).await?;
+
+    let proxy_client = build_proxy_client(&proxy_addr.to_string())?;
+
+    let res = proxy_client
+        .get(format!(
+            "https://localhost:{}/fingerprint",
+            server_addr.port()
+        ))
+        .send()
+        .await?;
+
+    assert_eq!(res.status(), 200);
+    let body: Value = serde_json::from_str(&res.text().await?)?;
+
+    // The upstream server should see the request arrive
+    assert!(body.get("http_version").is_some());
+    assert!(body.get("headers").is_some());
+
+    // Verify headers were forwarded (not empty)
+    let headers = body["headers"].as_object().unwrap();
+    assert!(!headers.is_empty());
+
+    let _ = stop_server.send(());
+    let _ = stop_proxy.send(());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_https_fingerprint_chrome() -> Result<()> {
+    let (server_addr, stop_server) = start_https_server().await?;
+
+    // Start proxy with Chrome emulation
+    let server = build_proxy_server_with_emulation(false, wreq_util::Emulation::Chrome145)?;
+    let (proxy_addr, stop_proxy) = run_proxy_server(server).await?;
+
+    let proxy_client = build_proxy_client(&proxy_addr.to_string())?;
+
+    let res = proxy_client
+        .get(format!(
+            "https://localhost:{}/fingerprint",
+            server_addr.port()
+        ))
+        .send()
+        .await?;
+
+    assert_eq!(res.status(), 200);
+    let body: Value = serde_json::from_str(&res.text().await?)?;
+
+    // The upstream server should see the request arrive successfully
+    assert!(body.get("http_version").is_some());
+    let headers = body["headers"].as_object().unwrap();
+    assert!(!headers.is_empty());
 
     let _ = stop_server.send(());
     let _ = stop_proxy.send(());

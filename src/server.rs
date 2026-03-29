@@ -9,7 +9,7 @@ use crate::{
 
 use anyhow::{anyhow, Context as _, Result};
 use bytes::Bytes;
-use futures_util::{stream, Sink, SinkExt, Stream, StreamExt, TryStreamExt};
+use futures_util::{stream, SinkExt, StreamExt, TryStreamExt};
 use http::{
     header::{
         CACHE_CONTROL, CONNECTION, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LENGTH,
@@ -26,12 +26,8 @@ use hyper::{
     upgrade::Upgraded,
     Method, StatusCode, Uri,
 };
-use hyper_rustls::HttpsConnectorBuilder;
 use hyper_tungstenite::WebSocketStream;
-use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
-    rt::{TokioExecutor, TokioIo},
-};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use pin_project_lite::pin_project;
 use serde::Serialize;
 use std::{
@@ -52,6 +48,7 @@ use tokio_graceful::Shutdown;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_tungstenite::tungstenite;
+use wreq_util::Emulation;
 
 pub const CERT_PREFIX: &str = "http://proxymore.local/";
 pub const WEB_PREFIX: &str = "/__proxymore__";
@@ -66,6 +63,8 @@ type TrafficDoneSender = mpsc::UnboundedSender<(usize, u64)>;
 pub struct ServerBuilder {
     ca: CertificateAuthority,
     reverse_proxy_url: Option<String>,
+    emulation: Emulation,
+    cert_verification: bool,
     title_filters: Vec<TitleFilter>,
     mime_filters: Vec<String>,
     web: bool,
@@ -77,6 +76,8 @@ impl ServerBuilder {
         Self {
             ca,
             reverse_proxy_url: None,
+            emulation: Emulation::Firefox147,
+            cert_verification: true,
             title_filters: vec![],
             mime_filters: vec![],
             web: false,
@@ -86,6 +87,16 @@ impl ServerBuilder {
 
     pub fn reverse_proxy_url(mut self, reverse_proxy_url: Option<String>) -> Self {
         self.reverse_proxy_url = reverse_proxy_url;
+        self
+    }
+
+    pub fn emulation(mut self, emulation: Emulation) -> Self {
+        self.emulation = emulation;
+        self
+    }
+
+    pub fn cert_verification(mut self, cert_verification: bool) -> Self {
+        self.cert_verification = cert_verification;
         self
     }
 
@@ -111,13 +122,20 @@ impl ServerBuilder {
     pub fn build(self) -> Arc<Server> {
         let temp_dir = std::env::temp_dir().join(format!("proxymore-{}", process::id()));
         info!(
-            "reverse_proxy_url={:?}, title_filters={:?}, mime_filters={:?}, web={}, temp_dir={}",
+            "reverse_proxy_url={:?}, emulation={:?}, title_filters={:?}, mime_filters={:?}, web={}, temp_dir={}",
             self.reverse_proxy_url,
+            self.emulation,
             self.title_filters,
             self.mime_filters,
             self.web,
             temp_dir.display(),
         );
+        let wreq_client = wreq::Client::builder()
+            .emulation(self.emulation)
+            .redirect(wreq::redirect::Policy::none())
+            .cert_verification(self.cert_verification)
+            .build()
+            .expect("Failed to build wreq client");
         Arc::new(Server {
             ca: self.ca,
             reverse_proxy_url: self.reverse_proxy_url,
@@ -126,6 +144,7 @@ impl ServerBuilder {
             web: self.web,
             state: Arc::new(State::new(self.print_mode)),
             temp_dir,
+            wreq_client,
         })
     }
 }
@@ -138,6 +157,7 @@ pub struct Server {
     web: bool,
     state: Arc<State>,
     temp_dir: PathBuf,
+    wreq_client: wreq::Client,
 }
 
 impl Server {
@@ -313,10 +333,9 @@ impl Server {
             }
         }
 
-        let mut builder = hyper::Request::builder().uri(&uri).method(method.clone());
+        let mut wreq_req = self.wreq_client.request(method.clone(), &uri);
 
         for (key, value) in req.headers().iter() {
-            // this is a clippy mess and should probably be fixed
             if matches!(
                 key,
                 &HOST
@@ -330,11 +349,11 @@ impl Server {
             {
                 continue;
             }
-            builder = builder.header(key.clone(), value.clone());
+            wreq_req = wreq_req.header(key, value);
         }
 
         // if we have a modified body from the editor, use it or just stream the original
-        let proxy_req = if let Some(body_bytes) = modified_req_body {
+        if let Some(body_bytes) = modified_req_body {
             let req_body_file = if traffic.valid {
                 match self.req_body_file(&mut traffic) {
                     Ok(v) => Some(v),
@@ -350,17 +369,7 @@ impl Server {
             if let Some(mut file) = req_body_file {
                 let _ = file.write_all(&body_bytes);
             }
-            let body = Full::new(Bytes::from(body_bytes))
-                .map_err(|err| anyhow!("{err}"))
-                .boxed();
-            match builder.body(body) {
-                Ok(v) => v,
-                Err(err) => {
-                    return self
-                        .internal_server_error(err, traffic, traffic_done_tx)
-                        .await;
-                }
-            }
+            wreq_req = wreq_req.body(body_bytes);
         } else {
             let req_body_file = if traffic.valid {
                 match self.req_body_file(&mut traffic) {
@@ -374,37 +383,17 @@ impl Server {
             } else {
                 None
             };
-            let req_body = BodyWrapper::new(req.into_body(), req_body_file, None)
-                .map_err(|e| anyhow!("{e}"))
-                .boxed();
-            match builder.body(req_body) {
-                Ok(v) => v,
-                Err(err) => {
-                    return self
-                        .internal_server_error(err, traffic, traffic_done_tx)
-                        .await;
-                }
-            }
+            // Stream the original body through, recording to file as it passes
+            let body_stream = http_body_util::BodyStream::new(req.into_body())
+                .try_filter_map(|frame| async { Ok(frame.into_data().ok()) })
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+
+            let body_stream = RecordingStream::new(body_stream, req_body_file);
+            wreq_req = wreq_req.body(wreq::Body::wrap_stream(body_stream));
         };
 
         traffic.set_start_time();
-        let builder = Client::builder(TokioExecutor::new());
-        let proxy_res = if uri.starts_with("https://") {
-            builder
-                .build(
-                    HttpsConnectorBuilder::new()
-                        .with_webpki_roots()
-                        .https_only()
-                        .enable_all_versions()
-                        .build(),
-                )
-                .request(proxy_req)
-                .await
-        } else {
-            builder.build(HttpConnector::new()).request(proxy_req).await
-        };
-
-        let proxy_res = match proxy_res {
+        let wreq_res = match wreq_req.send().await {
             Ok(v) => v,
             Err(err) => {
                 return self
@@ -412,6 +401,19 @@ impl Server {
                     .await;
             }
         };
+
+        // Convert wreq::Response to hyper::Response
+        let status = wreq_res.status();
+        let headers = wreq_res.headers().clone();
+        let body_stream = wreq_res
+            .bytes_stream()
+            .map_ok(Frame::data)
+            .map_err(|e| anyhow!("{e}"));
+        let stream_body = StreamBody::new(body_stream);
+
+        let mut proxy_res = hyper::Response::new(BodyExt::boxed(stream_body));
+        *proxy_res.status_mut() = status;
+        *proxy_res.headers_mut() = headers;
 
         self.process_proxy_res(proxy_res, traffic, traffic_done_tx, rule_action)
             .await
@@ -642,73 +644,115 @@ impl Server {
         req: hyper::Request<()>,
         id: usize,
     ) -> Result<()> {
-        let (server_to_client_socket, _) = tokio_tungstenite::connect_async(req).await?;
+        // Connect to upstream using wreq for browser TLS fingerprinting
+        let uri = req.uri().to_string();
+        let mut ws_req = self.wreq_client.websocket(&uri);
+        for (key, value) in req.headers().iter() {
+            if matches!(
+                key,
+                &HOST | &CONNECTION | &PROXY_AUTHORIZATION
+            ) || key == "sec-websocket-key"
+                || key == "sec-websocket-version"
+                || key == "sec-websocket-extensions"
+            {
+                continue;
+            }
+            ws_req = ws_req.header(key, value);
+        }
+        let ws_response = ws_req.send().await?;
+        let mut upstream_ws = ws_response.into_websocket().await?;
 
         let (to_client_sink, from_client_stream) = client_to_server_socket.split();
-        let (to_server_sink, from_server_stream) = server_to_client_socket.split();
 
-        let server = self.clone();
+        // Use channels to bridge wreq's !Unpin WebSocket with tungstenite's split interface
+        let (upstream_tx, mut upstream_rx) = tokio::sync::mpsc::unbounded_channel::<tungstenite::Message>();
+        let (downstream_tx, mut downstream_rx) = tokio::sync::mpsc::unbounded_channel::<tungstenite::Message>();
+
+        // Task: bridge wreq upstream WebSocket <-> channels
+        let server_ws = self.clone();
         tokio::spawn(async move {
-            server
-                .handle_websocket_message(from_client_stream, to_server_sink, id, false)
-                .await
+            loop {
+                tokio::select! {
+                    // Read from upstream, forward to downstream channel
+                    msg = futures_util::StreamExt::next(&mut upstream_ws) => {
+                        match msg {
+                            Some(Ok(wreq_msg)) => {
+                                let tung_msg = wreq_to_tungstenite(wreq_msg);
+                                let is_close = tung_msg.is_close();
+                                server_ws.state.add_websocket_message(id, &tung_msg, true).await;
+                                if downstream_tx.send(tung_msg).is_err() || is_close {
+                                    break;
+                                }
+                            }
+                            Some(Err(err)) => {
+                                server_ws.state.add_websocket_error(id, format!("Upstream WS error: {err}")).await;
+                                let _ = downstream_tx.send(tungstenite::Message::Close(None));
+                                break;
+                            }
+                            None => {
+                                server_ws.state.add_websocket_error(id, "Upstream WS closed".to_string()).await;
+                                let _ = downstream_tx.send(tungstenite::Message::Close(None));
+                                break;
+                            }
+                        }
+                    }
+                    // Read from upstream channel, send to upstream
+                    msg = upstream_rx.recv() => {
+                        match msg {
+                            Some(tung_msg) => {
+                                let wreq_msg = tungstenite_to_wreq(tung_msg);
+                                if let Err(err) = futures_util::SinkExt::send(&mut upstream_ws, wreq_msg).await {
+                                    server_ws.state.add_websocket_error(id, format!("Upstream WS send error: {err}")).await;
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
         });
 
+        // Task: client -> upstream (read from client, record, send to upstream channel)
+        let server_c2s = self.clone();
         tokio::spawn(async move {
-            self.handle_websocket_message(from_server_stream, to_client_sink, id, true)
-                .await
+            let mut from_client_stream = from_client_stream;
+            while let Some(message) = from_client_stream.next().await {
+                match message {
+                    Ok(message) => {
+                        server_c2s.state.add_websocket_message(id, &message, false).await;
+                        let is_close = message.is_close();
+                        if upstream_tx.send(message).is_err() || is_close {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        if !ignore_tungstenite_error(&err) {
+                            server_c2s.state.add_websocket_error(id, format!("Client WS error: {err}")).await;
+                        }
+                        let _ = upstream_tx.send(tungstenite::Message::Close(None));
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Task: upstream -> client (read from downstream channel, send to client)
+        tokio::spawn(async move {
+            let mut to_client_sink = to_client_sink;
+            while let Some(message) = downstream_rx.recv().await {
+                if let Err(err) = to_client_sink.send(message).await {
+                    if !ignore_tungstenite_error(&err) {
+                        self.state.add_websocket_error(id, format!("Client WS send error: {err}")).await;
+                    }
+                    break;
+                }
+            }
         });
 
         Ok(())
     }
 
-    async fn handle_websocket_message(
-        &self,
-        mut stream: impl Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
-            + Unpin
-            + Send
-            + 'static,
-        mut sink: impl Sink<tungstenite::Message, Error = tungstenite::Error> + Unpin + Send + 'static,
-        id: usize,
-        server_to_client: bool,
-    ) {
-        while let Some(message) = stream.next().await {
-            match message {
-                Ok(message) => {
-                    self.state
-                        .add_websocket_message(id, &message, server_to_client)
-                        .await;
-                    if let Err(err) = sink.send(message).await {
-                        if !ignore_tungstenite_error(&err) {
-                            self.state
-                                .add_websocket_error(id, format!("Websocket close error: {err}"))
-                                .await
-                        }
-                    }
-                }
-                Err(err) => {
-                    if ignore_tungstenite_error(&err) {
-                        self.state
-                            .add_websocket_error(id, "Closed".to_string())
-                            .await;
-                    } else {
-                        self.state
-                            .add_websocket_error(id, format!("Websocket message error: {err}"))
-                            .await;
-                    }
-                    if let Err(err) = sink.send(tungstenite::Message::Close(None)).await {
-                        if !ignore_tungstenite_error(&err) {
-                            self.state
-                                .add_websocket_error(id, format!("Websocket close error: {err}"))
-                                .await
-                        }
-                    };
-
-                    break;
-                }
-            }
-        }
-    }
 
     fn handle_connect(
         self: Arc<Self>,
@@ -1147,6 +1191,41 @@ where
     }
 }
 
+// Stream wrapper that records bytes to a file as they pass through
+pin_project! {
+    struct RecordingStream<S> {
+        #[pin]
+        inner: S,
+        file: Option<File>,
+    }
+}
+
+impl<S> RecordingStream<S> {
+    fn new(inner: S, file: Option<File>) -> Self {
+        Self { inner, file }
+    }
+}
+
+impl<S> futures_util::Stream for RecordingStream<S>
+where
+    S: futures_util::Stream<Item = Result<Bytes, std::io::Error>>,
+{
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        match this.inner.poll_next(cx) {
+            Poll::Ready(Some(Ok(data))) => {
+                if let Some(file) = this.file.as_mut() {
+                    let _ = file.write_all(&data);
+                }
+                Poll::Ready(Some(Ok(data)))
+            }
+            other => other,
+        }
+    }
+}
+
 fn set_res_body<T: std::fmt::Display>(res: &mut Response, body: T) {
     let body = Bytes::from(body.to_string());
     if let Ok(header_value) = HeaderValue::from_str(&body.len().to_string()) {
@@ -1187,4 +1266,39 @@ fn ignore_tungstenite_error(err: &tungstenite::Error) -> bool {
                 tungstenite::error::ProtocolError::ResetWithoutClosingHandshake
             )
     )
+}
+
+fn wreq_to_tungstenite(msg: wreq::ws::message::Message) -> tungstenite::Message {
+    match msg {
+        wreq::ws::message::Message::Text(s) => {
+            tungstenite::Message::Text(s.as_str().into())
+        }
+        wreq::ws::message::Message::Binary(b) => tungstenite::Message::Binary(b),
+        wreq::ws::message::Message::Ping(d) => tungstenite::Message::Ping(d),
+        wreq::ws::message::Message::Pong(d) => tungstenite::Message::Pong(d),
+        wreq::ws::message::Message::Close(frame) => tungstenite::Message::Close(frame.map(|f| {
+            tungstenite::protocol::CloseFrame {
+                code: u16::from(f.code).into(),
+                reason: f.reason.as_str().into(),
+            }
+        })),
+    }
+}
+
+fn tungstenite_to_wreq(msg: tungstenite::Message) -> wreq::ws::message::Message {
+    match msg {
+        tungstenite::Message::Text(s) => {
+            wreq::ws::message::Message::Text(s.as_str().into())
+        }
+        tungstenite::Message::Binary(b) => wreq::ws::message::Message::Binary(b),
+        tungstenite::Message::Ping(d) => wreq::ws::message::Message::Ping(d),
+        tungstenite::Message::Pong(d) => wreq::ws::message::Message::Pong(d),
+        tungstenite::Message::Close(frame) => wreq::ws::message::Message::Close(frame.map(|f| {
+            wreq::ws::message::CloseFrame {
+                code: wreq::ws::message::CloseCode::from(u16::from(f.code)),
+                reason: f.reason.as_str().into(),
+            }
+        })),
+        tungstenite::Message::Frame(_) => wreq::ws::message::Message::Close(None),
+    }
 }

@@ -26,6 +26,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::time::timeout;
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_graceful::Shutdown;
+use tokio_rustls;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::io::ReaderStream;
 
@@ -81,6 +82,27 @@ async fn test_server(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, a
             if let Some(content_type) = content_type {
                 res.headers_mut().insert(CONTENT_TYPE, content_type);
             }
+            Ok(res)
+        }
+        (&Method::GET, "/fingerprint") => {
+            let version = format!("{:?}", req.version());
+            let mut headers_map = serde_json::Map::new();
+            for (name, value) in req.headers().iter() {
+                headers_map.insert(
+                    name.as_str().to_string(),
+                    serde_json::Value::String(value.to_str().unwrap_or("").to_string()),
+                );
+            }
+            let body_json = serde_json::json!({
+                "http_version": version,
+                "headers": headers_map,
+            });
+            let body = Bytes::from(body_json.to_string());
+            let mut res = Response::new(Full::new(body).map_err(|err| anyhow!("{err}")).boxed());
+            res.headers_mut().insert(
+                CONTENT_TYPE,
+                http::header::HeaderValue::from_static("application/json"),
+            );
             Ok(res)
         }
         _ => {
@@ -179,6 +201,70 @@ pub fn build_client() -> Result<reqwest::Client> {
         .build()?;
 
     Ok(client)
+}
+
+pub fn build_proxy_server_with_emulation(
+    web: bool,
+    emulation: wreq_util::Emulation,
+) -> Result<Arc<Server>> {
+    let ca = build_ca()?;
+    let server = ServerBuilder::new(ca)
+        .print_mode(PrintMode::Nothing)
+        .emulation(emulation)
+        .cert_verification(false)
+        .web(web)
+        .build();
+    Ok(server)
+}
+
+pub async fn start_https_server() -> Result<(SocketAddr, oneshot::Sender<()>)> {
+    let ca = build_ca()?;
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
+    let addr = listener.local_addr()?;
+    let (tx, rx) = oneshot::channel();
+
+    // Generate a server config for localhost
+    let authority: http::uri::Authority = format!("localhost:{}", addr.port()).parse()?;
+    let server_config = ca.gen_server_config(&authority).await?;
+    let tls_acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+
+    tokio::spawn(async move {
+        let server = auto::Builder::new(TokioExecutor::new());
+        let shutdown = Shutdown::new(async { rx.await.unwrap_or_default() });
+        let guard = shutdown.guard_weak();
+
+        loop {
+            tokio::select! {
+                res = listener.accept() => {
+                    let Ok((tcp, _)) = res else {
+                        continue;
+                    };
+
+                    let tls_acceptor = tls_acceptor.clone();
+                    let server = server.clone();
+
+                    shutdown.spawn_task(async move {
+                        let Ok(tls_stream) = tls_acceptor.accept(tcp).await else {
+                            return;
+                        };
+                        let _ = server
+                            .serve_connection_with_upgrades(
+                                hyper_util::rt::TokioIo::new(tls_stream),
+                                service_fn(test_server),
+                            )
+                            .await;
+                    });
+                }
+                _ = guard.cancelled() => {
+                    break;
+                }
+            }
+        }
+
+        shutdown.shutdown().await;
+    });
+
+    Ok((addr, tx))
 }
 
 pub fn build_ca() -> Result<CertificateAuthority> {

@@ -24,8 +24,7 @@ glob-match = "0.2"
 http = "1.1.0"
 http-body-util = "0.1"
 hyper = { version = "1.0", features = ["full"] }
-hyper-rustls = { version = "0.27.3", default-features = false, features = ["webpki-roots", "webpki-tokio", "ring", "http1", "http2", "tls12"] }
-hyper-util = { version = "0.1", features = ["server-auto", "client-legacy"] }
+hyper-util = { version = "0.1", features = ["server-auto"] }
 hyper-tungstenite = "0.17.0"
 indexmap = { version = "2.2.5", features = ["serde"] }
 moka = { version = "0.12.5", features = ["future"] }
@@ -42,7 +41,9 @@ tokio-graceful = "0.2.2"
 tokio-util = { version = "0.7",  features = ["io-util", "compat"] }
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-stream = { version = "0.1.14", default-features = false, features = ["sync"] }
-tokio-tungstenite = { version = "0.26.1", features = ["rustls", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.26.1", default-features = false }
+wreq = { version = "6.0.0-rc.28", default-features = false, features = ["stream", "ws"] }
+wreq-util = "3.0.0-rc.10"
 url = "2.5.0"
 crossterm = "0.28.1"
 ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }

@@ -18,6 +18,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::net::TcpListener;
+use wreq_util::Emulation;
 
 const CA_CERT_FILENAME: &str = "proxymore-ca-cert.cer";
 const PRIVATE_KEY_FILENAME: &str = "proxymore-key.pem";
@@ -35,6 +36,7 @@ async fn main() -> Result<()> {
         parse_addr(&cli.listen).ok_or_else(|| anyhow!("Invalid addr '{}'", cli.listen))?;
     let addr = format!("{}:{}", ip, port);
     let reverse_proxy_url = cli.reverse_proxy_url.map(sanitize_reverse_proxy_url);
+    let emulation = parse_emulation(&cli.emulation)?;
     let title_filters = parse_title_filters(&cli.filters)?;
     let mime_filters: Vec<String> = cli.mime_filters.iter().map(|v| v.to_lowercase()).collect();
     let listener = TcpListener::bind(SocketAddr::new(ip, port)).await?;
@@ -49,6 +51,7 @@ async fn main() -> Result<()> {
     };
     let server = ServerBuilder::new(ca)
         .reverse_proxy_url(reverse_proxy_url)
+        .emulation(emulation)
         .title_filters(title_filters)
         .mime_filters(mime_filters)
         .web(cli.web)
@@ -95,6 +98,9 @@ struct Cli {
     /// Dump all traffics
     #[clap(short = 'D', long)]
     dump: bool,
+    /// Browser TLS fingerprint emulation (firefox, chrome, safari, edge, opera)
+    #[clap(short = 'E', long, value_name = "BROWSER", default_value = "firefox")]
+    emulation: String,
     /// Reverse proxy url
     #[clap(value_name = "URL")]
     reverse_proxy_url: Option<String>,
@@ -154,6 +160,138 @@ fn parse_addr(value: &str) -> Option<(IpAddr, u16)> {
         }
     } else {
         None
+    }
+}
+
+fn parse_emulation(s: &str) -> Result<Emulation> {
+    match s.to_lowercase().as_str() {
+        // set to some default versions up here
+        "firefox" | "ff" => Ok(Emulation::Firefox147),
+        "chrome" | "cr" => Ok(Emulation::Chrome145),
+        "safari" | "sf" => Ok(Emulation::Safari26_2),
+        "edge" => Ok(Emulation::Edge145),
+        "opera" => Ok(Emulation::Opera119),
+        other => {
+            let lower = other.to_lowercase();
+            if lower.starts_with("chrome") {
+                let ver = lower.strip_prefix("chrome").unwrap_or("");
+                // enums are found at https://docs.rs/wreq-util/latest/wreq_util/enum.Emulation.html
+                return match ver {
+                    "100" => Ok(Emulation::Chrome100),
+                    "101" => Ok(Emulation::Chrome101),
+                    "104" => Ok(Emulation::Chrome104),
+                    "105" => Ok(Emulation::Chrome105),
+                    "106" => Ok(Emulation::Chrome106),
+                    "107" => Ok(Emulation::Chrome107),
+                    "108" => Ok(Emulation::Chrome108),
+                    "109" => Ok(Emulation::Chrome109),
+                    "110" => Ok(Emulation::Chrome110),
+                    "114" => Ok(Emulation::Chrome114),
+                    "116" => Ok(Emulation::Chrome116),
+                    "117" => Ok(Emulation::Chrome117),
+                    "118" => Ok(Emulation::Chrome118),
+                    "119" => Ok(Emulation::Chrome119),
+                    "120" => Ok(Emulation::Chrome120),
+                    "123" => Ok(Emulation::Chrome123),
+                    "124" => Ok(Emulation::Chrome124),
+                    "126" => Ok(Emulation::Chrome126),
+                    "127" => Ok(Emulation::Chrome127),
+                    "128" => Ok(Emulation::Chrome128),
+                    "129" => Ok(Emulation::Chrome129),
+                    "130" => Ok(Emulation::Chrome130),
+                    "131" => Ok(Emulation::Chrome131),
+                    "132" => Ok(Emulation::Chrome132),
+                    "133" => Ok(Emulation::Chrome133),
+                    "134" => Ok(Emulation::Chrome134),
+                    "135" => Ok(Emulation::Chrome135),
+                    "136" => Ok(Emulation::Chrome136),
+                    "137" => Ok(Emulation::Chrome137),
+                    "138" => Ok(Emulation::Chrome138),
+                    "139" => Ok(Emulation::Chrome139),
+                    "140" => Ok(Emulation::Chrome140),
+                    "141" => Ok(Emulation::Chrome141),
+                    "142" => Ok(Emulation::Chrome142),
+                    "143" => Ok(Emulation::Chrome143),
+                    "144" => Ok(Emulation::Chrome144),
+                    "145" => Ok(Emulation::Chrome145),
+                    _ => Err(anyhow!("Unknown Chrome version: {}", s)),
+                };
+            }
+            if lower.starts_with("firefox") {
+                let ver = lower.strip_prefix("firefox").unwrap_or("");
+                return match ver {
+                    "109" => Ok(Emulation::Firefox109),
+                    "117" => Ok(Emulation::Firefox117),
+                    "128" => Ok(Emulation::Firefox128),
+                    "133" => Ok(Emulation::Firefox133),
+                    "135" => Ok(Emulation::Firefox135),
+                    "136" => Ok(Emulation::Firefox136),
+                    "139" => Ok(Emulation::Firefox139),
+                    "142" => Ok(Emulation::Firefox142),
+                    "143" => Ok(Emulation::Firefox143),
+                    "144" => Ok(Emulation::Firefox144),
+                    "145" => Ok(Emulation::Firefox145),
+                    "146" => Ok(Emulation::Firefox146),
+                    "147" => Ok(Emulation::Firefox147),
+                    _ => Err(anyhow!("Unknown Firefox version: {}", s)),
+                };
+            }
+            if lower.starts_with("safari") {
+                let ver = lower.strip_prefix("safari").unwrap_or("");
+                return match ver {
+                    "15.3" => Ok(Emulation::Safari15_3),
+                    "15.5" => Ok(Emulation::Safari15_5),
+                    "16" => Ok(Emulation::Safari16),
+                    "16.5" => Ok(Emulation::Safari16_5),
+                    "17.0" => Ok(Emulation::Safari17_0),
+                    "17.5" => Ok(Emulation::Safari17_5),
+                    "18" => Ok(Emulation::Safari18),
+                    "18.2" => Ok(Emulation::Safari18_2),
+                    "18.3" => Ok(Emulation::Safari18_3),
+                    "18.5" => Ok(Emulation::Safari18_5),
+                    "26" => Ok(Emulation::Safari26),
+                    "26.1" => Ok(Emulation::Safari26_1),
+                    "26.2" => Ok(Emulation::Safari26_2),
+                    _ => Err(anyhow!("Unknown Safari version: {}", s)),
+                };
+            }
+            if lower.starts_with("edge") {
+                let ver = lower.strip_prefix("edge").unwrap_or("");
+                return match ver {
+                    "101" => Ok(Emulation::Edge101),
+                    "122" => Ok(Emulation::Edge122),
+                    "127" => Ok(Emulation::Edge127),
+                    "131" => Ok(Emulation::Edge131),
+                    "134" => Ok(Emulation::Edge134),
+                    "135" => Ok(Emulation::Edge135),
+                    "136" => Ok(Emulation::Edge136),
+                    "137" => Ok(Emulation::Edge137),
+                    "138" => Ok(Emulation::Edge138),
+                    "139" => Ok(Emulation::Edge139),
+                    "140" => Ok(Emulation::Edge140),
+                    "141" => Ok(Emulation::Edge141),
+                    "142" => Ok(Emulation::Edge142),
+                    "143" => Ok(Emulation::Edge143),
+                    "144" => Ok(Emulation::Edge144),
+                    "145" => Ok(Emulation::Edge145),
+                    _ => Err(anyhow!("Unknown Edge version: {}", s)),
+                };
+            }
+            if lower.starts_with("opera") {
+                let ver = lower.strip_prefix("opera").unwrap_or("");
+                return match ver {
+                    "116" => Ok(Emulation::Opera116),
+                    "117" => Ok(Emulation::Opera117),
+                    "118" => Ok(Emulation::Opera118),
+                    "119" => Ok(Emulation::Opera119),
+                    _ => Err(anyhow!("Unknown Opera version: {}", s)),
+                };
+            }
+            Err(anyhow!(
+                "Unknown browser emulation: '{}'. Use firefox, chrome, safari, edge, or opera (optionally with version, e.g. firefox136)",
+                s
+            ))
+        }
     }
 }
 
