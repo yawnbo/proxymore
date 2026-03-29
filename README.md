@@ -133,9 +133,6 @@ To decrypt HTTPS traffic, you must install `proxymore`'s CA certificate on your 
 
 ![proxymore.local](https://github.com/yawnbo/proxymore/assets/4012553/a5276872-8ab1-4794-9e97-ac7038ca5e4a)
 
-## Known Issues
-
-Certain redirects don't work properly, it's being looked into, an example of this was https://gist.github.com/yakuter/a6d860317b175d6336638ac51a3feaff
 ## License
 
 Copyright (c) 2024-∞ proxymore-developers.
