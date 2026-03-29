@@ -26,7 +26,6 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::time::timeout;
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_graceful::Shutdown;
-use tokio_rustls;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::io::ReaderStream;
 
